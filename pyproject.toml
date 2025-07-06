@@ -1,0 +1,216 @@
+[project]
+name = "algo-trade"
+version = "2.0.0"
+description = "Production-grade Automated Intraday Trading Signal Generation System"
+authors = [
+    { name = "Senior Quantitative Developer", email = "trader@example.com" }
+]
+dependencies = [
+    # Core data processing
+    "pandas>=2.1.0", # No newer version found
+    "numpy>=1.24.0,<2.3.0", # Updated for numba compatibility
+    "scipy>=1.11.0", # No newer version found
+    
+    # Machine Learning
+    "scikit-learn>=1.3.0", # No newer version found
+    "lightgbm>=4.6.0", # Updated from 4.1.0 to 4.6.0
+    "joblib>=1.5.1", # Updated from 1.3.0 to 1.5.1
+    
+    # Trading & Broker Integration
+    "kiteconnect>=5.0.1", # Updated from 4.2.0 to 5.0.1
+    
+    # Configuration & Validation
+    "pydantic>=2.4.0", # No newer version found
+    "pydantic-settings>=2.0.3", # No newer version found
+    "pyyaml>=6.0.1", # No newer version found
+    
+    # Database & TimescaleDB
+    "psycopg2-binary>=2.9.7", # No newer version found
+    "asyncpg>=0.30.0", # Updated from 0.28.0 to 0.30.0
+    "sqlalchemy>=2.0.0", # No newer version found
+    
+    # Logging & Monitoring
+    "loguru>=0.7.3", # Updated from 0.7.2 to 0.7.3
+    
+    # Technical Analysis
+    "ta-lib>=0.4.25", # No newer version found (Note: ta-lib often requires manual installation/binaries)
+    "numba>=0.61.2", # Updated from 0.58.0 to 0.61.2
+    
+    # Performance & Memory
+    "psutil>=5.9.0", # No newer version found
+    "pyarrow>=14.0.0", # No newer version found
+    
+    # Networking & Async
+    "httpx>=0.28.1", # Updated from 0.25.0 to 0.28.1
+    "websockets>=11.0.0", # No newer version found
+    "aiofiles>=24.1.0", # Updated from 23.2.0 to 24.1.0
+    "Flask>=2.0.0", # Added for local auth server
+    
+    # Time handling
+    "pytz>=2023.3", # No newer version found
+    
+    # Data serialization
+    "orjson>=3.9.0", # No newer version found
+    
+    # Progress tracking
+    "tqdm>=4.66.0", # No newer version found
+    
+    # Development utilities
+    "typer>=0.9.0", # No newer version found
+]
+requires-python = ">=3.9"
+readme = "README.md"
+license = { text = "MIT" } # Placeholder, please update
+
+[project.optional-dependencies]
+dev = [
+    # Testing
+    "pytest>=7.4.0", # No newer version found
+    "pytest-asyncio>=0.21.0", # No newer version found
+    "pytest-cov>=4.1.0", # No newer version found
+    "pytest-mock>=3.11.0", # No newer version found
+    "pytest-benchmark>=4.0.0", # No newer version found
+    
+    # Code Quality
+    "black>=23.9.0", # No specific newer version found for black (often ties to a date-based versioning for stable releases)
+    "ruff>=0.12.2", # No newer version found
+    "mypy>=1.16.0", # No newer version found
+    "bandit>=1.8.5", # Updated from 1.7.5 to 1.8.5
+    
+    # Analysis & Visualization
+    "jupyter>=7.4.4", # Updated from 1.0.0 to 7.4.4
+    "plotly>=5.17.0", # No newer version found
+    "seaborn>=0.12.0", # No newer version found
+    "matplotlib>=3.10.3", # Updated from 3.8.0 to 3.10.3
+    
+    # Documentation
+    "mkdocs>=1.6.1", # Updated from 1.5.0 to 1.6.1
+    "mkdocs-material>=9.6.15", # Updated from 9.4.0 to 9.6.15
+    
+    # Performance profiling
+    "memory-profiler>=1.0.0", # Updated from 0.61.0 to 1.0.0
+    "line-profiler>=2021.01.11.16.17.27", # Updated from 4.1.0 to 2021.01.11.16.17.27 (Note: this versioning seems to be date-based)
+]
+
+test = [
+    "pytest>=7.4.0", # No newer version found
+    "pytest-asyncio>=0.21.0", # No newer version found
+    "pytest-cov>=4.1.0", # No newer version found
+    "pytest-mock>=3.11.0", # No newer version found
+]
+
+docs = [
+    "mkdocs>=1.6.1", # Updated from 1.5.0 to 1.6.1
+    "mkdocs-material>=9.6.15", # Updated from 9.4.0 to 9.6.15
+    "mkdocstrings>=0.23.0", # No newer version found
+]
+
+[build-system]
+requires = ["setuptools>=61.0"] # No newer version found
+build-backend = "setuptools.build_meta"
+
+[tool.black]
+line-length = 120
+target-version = ['py39', 'py310', 'py311']
+skip-string-normalization = false
+skip-magic-trailing-comma = false
+
+[tool.ruff]
+line-length = 120
+target-version = "py39"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "C4",  # flake8-comprehensions
+    "UP",  # pyupgrade
+    "ARG", # flake8-unused-arguments
+    "SIM", # flake8-simplify
+    "TCH", # flake8-type-checking
+    "PGH", # pygrep-hooks
+    "PIE", # flake8-pie
+    "RET", # flake8-return
+    "ICN", # flake8-import-conventions
+]
+ignore = [
+    "E501",  # line too long (handled by black)
+    "B008",  # function calls in defaults
+    "ARG002", # unused method argument
+    "ARG001", # unused function argument
+]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401", "F403"]
+"tests/*" = ["ARG", "S101"] # Allow assert statements in tests
+"*/migrations/*" = ["E501"] # Allow long lines in migrations
+
+[tool.ruff.lint.isort]
+known-first-party = ["src"]
+force-single-line = false
+
+[tool.mypy]
+python_version = "3.9"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+disallow_untyped_decorators = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+warn_unreachable = true
+strict_equality = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+addopts = [
+    "-ra",
+    "--strict-markers",
+    "--strict-config",
+    "--cov=src",
+    "--cov-report=term-missing:skip-covered",
+    "--cov-report=html",
+    "--cov-report=xml",
+]
+testpaths = ["tests"]
+filterwarnings = [
+    "error",
+    "ignore::UserWarning",
+    "ignore::DeprecationWarning",
+]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks tests as integration tests",
+    "unit: marks tests as unit tests",
+]
+
+[tool.coverage.run]
+source = ["src"]
+branch = true
+parallel = true
+
+[tool.coverage.report]
+exclude_lines = [
+    "no cov",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+]
+
+[tool.bandit]
+exclude_dirs = ["tests"]
+skips = ["B101", "B601"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["*"]
+
+[tool.setuptools.package-data]
+"*" = ["*.yaml", "*.yml", "*.json", "*.sql"]
