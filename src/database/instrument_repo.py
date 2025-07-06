@@ -1,4 +1,4 @@
-from typing import Any, Optional
+from typing import Optional
 
 from src.database.db_utils import db_manager
 from src.database.models import InstrumentData

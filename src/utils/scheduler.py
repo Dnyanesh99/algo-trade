@@ -37,7 +37,6 @@ class Scheduler:
         self.market_calendar = market_calendar
         self.system_state = system_state
         self.prediction_pipeline_callback = prediction_pipeline_callback
-        
 
         # Configuration-driven parameters
         self.candle_interval_minutes = config.scheduler.prediction_interval_minutes
@@ -67,14 +66,14 @@ class Scheduler:
         try:
             while self._is_running:
                 now = datetime.now(self.market_calendar.tz)
-                time_to_sleep = 1.0 # Minimum sleep to prevent busy-waiting
+                time_to_sleep = 1.0  # Minimum sleep to prevent busy-waiting
 
                 if not self.market_calendar.is_market_open(now):
                     # Market closed - reset state and wait until next market open
                     if self._last_triggered_candle != -1:
                         logger.info(f"Market closed at {now.strftime('%H:%M:%S')}. Resetting state.")
                         self._last_triggered_candle = -1
-                    
+
                     next_market_open = self.market_calendar.get_next_trading_day(now)
                     time_to_sleep = (next_market_open - now).total_seconds()
                     logger.debug(f"Market closed. Sleeping for {time_to_sleep:.2f}s until next market open.")
@@ -83,26 +82,37 @@ class Scheduler:
                     # Market is open - check readiness
                     if not self._check_system_readiness(now):
                         # If not ready, sleep until readiness check time or next minute
-                        readiness_dt = now.replace(hour=self.readiness_check_time.hour, minute=self.readiness_check_time.minute, second=0, microsecond=0)
+                        readiness_dt = now.replace(
+                            hour=self.readiness_check_time.hour,
+                            minute=self.readiness_check_time.minute,
+                            second=0,
+                            microsecond=0,
+                        )
                         if now < readiness_dt:
-                            time_to_sleep = (readiness_dt - now).total_seconds() + 1 # Add 1 second to ensure we pass the time
+                            time_to_sleep = (
+                                readiness_dt - now
+                            ).total_seconds() + 1  # Add 1 second to ensure we pass the time
                             logger.debug(f"Not ready. Sleeping for {time_to_sleep:.2f}s until readiness check time.")
                         else:
                             # Already past readiness time, but not ready (e.g., 60-min data not available)
                             # Sleep for a short period to re-check
-                            time_to_sleep = 5.0 # Re-check every 5 seconds
+                            time_to_sleep = 5.0  # Re-check every 5 seconds
                             logger.debug(f"Past readiness time but not ready. Sleeping for {time_to_sleep:.2f}s.")
 
                     else:
                         # System is ready, calculate sleep until next candle boundary
                         next_boundary = self._get_next_candle_boundary_time(now)
                         time_to_sleep = (next_boundary - now).total_seconds()
-                        
+
                         if time_to_sleep <= 0:
                             # Already past boundary, trigger immediately and sleep for next interval
-                            logger.warning(f"Scheduler running behind. Triggering immediately. Time behind: {abs(time_to_sleep):.2f}s")
-                            time_to_sleep = self.candle_interval_minutes * 60 # Sleep for full interval after triggering
-                        
+                            logger.warning(
+                                f"Scheduler running behind. Triggering immediately. Time behind: {abs(time_to_sleep):.2f}s"
+                            )
+                            time_to_sleep = (
+                                self.candle_interval_minutes * 60
+                            )  # Sleep for full interval after triggering
+
                         logger.debug(f"Ready. Sleeping for {time_to_sleep:.2f}s until next candle boundary.")
 
                         # Check if we should trigger prediction pipeline
@@ -122,18 +132,9 @@ class Scheduler:
                                 except Exception as e:
                                     logger.error(f"Pipeline execution failed: {e}")
                                     # Continue running despite pipeline failure
-                
+
                 # Ensure sleep is not negative or excessively small
                 await asyncio.sleep(max(1.0, time_to_sleep))
-
-        except asyncio.CancelledError:
-            logger.info("Scheduler cancelled")
-            raise
-        except Exception as e:
-            logger.error(f"Fatal error in scheduler: {e}")
-            raise
-        finally:
-            logger.info("Scheduler loop ended")
 
         except asyncio.CancelledError:
             logger.info("Scheduler cancelled")
@@ -160,7 +161,7 @@ class Scheduler:
             # For now, raising an error to ensure it's addressed.
             # self.system_state.set_60_min_data_available(True) # REMOVE THIS HARDCODED LINE
             # raise NotImplementedError("60-min data availability check not implemented. This must query the database.")
-            return False # Temporarily return False until implemented
+            return False  # Temporarily return False until implemented
 
         return self.system_state.is_60_min_data_available()
 
@@ -171,7 +172,7 @@ class Scheduler:
         """
         # Calculate the minute within the current candle interval
         minute_in_interval = now.minute % self.candle_interval_minutes
-        
+
         # The target minute is the last minute of the interval (e.g., 14 for a 15-min candle)
         target_minute = self.candle_interval_minutes - 1
 
@@ -192,20 +193,22 @@ class Scheduler:
         For a 15-min candle, if now is 10:05:30, next boundary is 10:15:00.
         """
         current_minute = now.minute
-        minutes_to_next_boundary = self.candle_interval_minutes - (current_minute % self.candle_interval_minutes)
-        
-        # If current_minute is already a multiple of candle_interval_minutes (e.g., 10:15 for 15-min),
-        # the next boundary is the current time + candle_interval_minutes.
-        if minutes_to_next_boundary == self.candle_interval_minutes and now.second == 0 and now.microsecond == 0:
-            minutes_to_next_boundary = 0 # It's already the boundary, so next is current + interval
+        # Calculate minutes to the next multiple of candle_interval_minutes
+        minutes_to_add = self.candle_interval_minutes - (current_minute % self.candle_interval_minutes)
 
-        next_boundary = now.replace(second=0, microsecond=0) + timedelta(minutes=minutes_to_next_boundary)
-        
-        # If the calculated next_boundary is in the past (due to being exactly on a boundary and seconds > 0),
-        # then add another interval.
+        # If current_minute is already a multiple of candle_interval_minutes (e.g., 10:15 for 15-min)
+        # and we are exactly at 0 seconds, the next boundary is current time + interval.
+        # Otherwise, if we are past 0 seconds, the next boundary is the current time + interval.
+        if minutes_to_add == self.candle_interval_minutes:
+            minutes_to_add = 0  # This means we are exactly on a boundary, so next boundary is current time + interval
+
+        next_boundary = now.replace(second=0, microsecond=0) + timedelta(minutes=minutes_to_add)
+
+        # If the calculated next_boundary is in the past or exactly now (and we want the *next* one)
+        # and we are not exactly at the start of the current boundary (i.e., seconds > 0 or microseconds > 0)
         if next_boundary <= now and (now.second > 0 or now.microsecond > 0):
             next_boundary += timedelta(minutes=self.candle_interval_minutes)
-            
+
         return next_boundary
 
     def start(self) -> None:

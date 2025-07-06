@@ -1,6 +1,7 @@
 import asyncio
 import time
 from collections import defaultdict
+from collections.abc import Awaitable
 from typing import Any, Callable, Optional
 
 from src.state.system_state import SystemState
@@ -20,8 +21,8 @@ class CircuitBreaker:
     def __init__(
         self,
         name: str,
-        on_trip: Optional[Callable[[str], Any]] = None,
-        on_reset: Optional[Callable[[str], Any]] = None,
+        on_trip: Optional[Callable[[str], Awaitable[Any]]] = None,
+        on_reset: Optional[Callable[[str], Awaitable[Any]]] = None,
     ):
         self.name = name
         self.failure_threshold = config.error_handler.failure_threshold
@@ -172,8 +173,7 @@ class ErrorHandler:
         Retrieves or creates a circuit breaker for a given component.
         """
         if component_name not in self.circuit_breakers:
-            breaker = self._create_default_breaker()
-            breaker.name = component_name  # Set the correct name
+            breaker = self._create_default_breaker(component_name)
             self.circuit_breakers[component_name] = breaker
         return self.circuit_breakers[component_name]
 
@@ -193,6 +193,3 @@ class ErrorHandler:
             await breaker.record_failure()
             logger.error(f"Operation for {component_name} failed: {e}")
             raise
-
-
-

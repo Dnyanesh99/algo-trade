@@ -1,4 +1,4 @@
-import asyncio
+from datetime import datetime
 from typing import Any
 
 from src.utils.config_loader import config_loader
@@ -46,10 +46,23 @@ class TickValidator:
             )
             return False
 
-        # 3. Validate timestamp type (assuming Unix timestamp or ISO string)
-        timestamp = tick["timestamp"]
-        if not isinstance(timestamp, (int, float, str)):
-            logger.warning(f"Invalid timestamp type: Expected int, float or str, got {type(timestamp)}. Tick: {tick}")
+        # 3. Validate timestamp type and convert to datetime
+        timestamp_raw = tick["timestamp"]
+        try:
+            if isinstance(timestamp_raw, (int, float)):
+                # Assume Unix timestamp (seconds)
+                timestamp = datetime.fromtimestamp(timestamp_raw)
+            elif isinstance(timestamp_raw, str):
+                # Attempt to parse ISO format string
+                timestamp = datetime.fromisoformat(timestamp_raw.replace("Z", "+00:00"))
+            else:
+                logger.warning(
+                    f"Invalid timestamp type: Expected int, float or str, got {type(timestamp_raw)}. Tick: {tick}"
+                )
+                return False
+            tick["timestamp"] = timestamp  # Update tick with datetime object
+        except (ValueError, TypeError) as e:
+            logger.warning(f"Could not parse timestamp '{timestamp_raw}': {e}. Tick: {tick}")
             return False
 
         # 4. Validate numeric values (LTP, volume, etc.)
@@ -101,6 +114,3 @@ class TickValidator:
 
         logger.debug(f"Tick for {instrument_token} passed validation.")
         return True
-
-
-

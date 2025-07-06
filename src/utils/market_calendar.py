@@ -4,12 +4,12 @@ Handles special sessions, half-day trading, and timezone conversions.
 """
 
 from datetime import date, datetime, time, timedelta
-from typing import Any, Optional
+from typing import Optional
 
 import pandas as pd
 import pytz
 
-from src.utils.config_loader import config_loader, SpecialSession
+from src.utils.config_loader import SpecialSession, config_loader
 from src.utils.logger import LOGGER as logger
 
 # Load configuration
@@ -33,10 +33,19 @@ class MarketCalendar:
         return [datetime.strptime(d, "%Y-%m-%d").date() for d in config.market_calendar.holidays]
 
     def _is_muhurat_trading(self, dt_local: datetime) -> bool:
+        """
+        Checks if the given datetime falls within a Muhurat trading session.
+        """
         for session in self.muhurat_trading_sessions:
             if dt_local.date() == session.date and session.open <= dt_local.time() <= session.close:
                 return True
         return False
+
+    def _has_muhurat_session_on_day(self, check_date: date) -> bool:
+        """
+        Checks if the given date has any Muhurat trading session.
+        """
+        return any(check_date == session.date for session in self.muhurat_trading_sessions)
 
     def _get_half_day_close_time(self, dt_local: datetime) -> Optional[time]:
         for session in self.half_day_sessions:
@@ -110,7 +119,7 @@ class MarketCalendar:
         weekdays = timestamps_local.dt.weekday
 
         # 1. Standard market hours (weekdays, not holidays, within standard open/close)
-        is_weekday = (weekdays < 5)
+        is_weekday = weekdays < 5
         is_not_holiday = ~dates.isin(self.holidays)
 
         standard_market_open = self.market_open_time
@@ -125,7 +134,7 @@ class MarketCalendar:
             session_open = session.open
             session_close = session.close
 
-            on_session_date_mask = (dates == session_date)
+            on_session_date_mask = dates == session_date
             session_hours_mask = (times >= session_open) & (times <= session_close)
             mask = mask | (on_session_date_mask & session_hours_mask)
 
@@ -135,7 +144,7 @@ class MarketCalendar:
             session_open = self.market_open_time  # Half-days typically start at standard open
             session_close = session.close
 
-            on_session_date_mask = (dates == session_date)
+            on_session_date_mask = dates == session_date
             session_hours_mask = (times >= session_open) & (times <= session_close)
             mask = mask | (on_session_date_mask & session_hours_mask)
 
@@ -167,10 +176,13 @@ class MarketCalendar:
 
         # Loop until a valid trading day is found
         while True:
-            test_dt = self.tz.localize(datetime.combine(prev_day, self.market_open_time))
-            # Check if it's a holiday or weekend, but allow Muhurat trading
-            if self._is_muhurat_trading(test_dt):
-                return test_dt  # Muhurat trading day is a valid trading day
-            if not (test_dt.weekday() >= 5 or test_dt.date() in self.holidays):
+            test_date = prev_day
+            test_dt = self.tz.localize(datetime.combine(test_date, self.market_open_time))
+
+            # A day is a valid trading day if it's not a weekend/holiday OR it has a Muhurat session
+            is_weekend_or_holiday = test_dt.weekday() >= 5 or test_date in self.holidays
+            has_muhurat = self._has_muhurat_session_on_day(test_date)
+
+            if not is_weekend_or_holiday or has_muhurat:
                 return test_dt  # Found a valid trading day
             prev_day -= timedelta(days=1)

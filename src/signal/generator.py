@@ -1,4 +1,3 @@
-import asyncio
 from datetime import datetime
 from typing import Any, Callable, Optional
 
@@ -71,6 +70,8 @@ class SignalGenerator:
         direction: str = "Neutral"
 
         try:
+            start_time = self.performance_metrics.start_timer("signal_generator")
+
             if prediction == 1 and confidence_score >= self.signal_config.buy_threshold:
                 signal_type = "Entry"
                 direction = "Long"
@@ -82,7 +83,7 @@ class SignalGenerator:
                 direction = "Neutral"
 
             signal_data = {
-                "ts": timestamp,
+                "timestamp": timestamp,
                 "instrument_id": instrument_id,
                 "signal_type": signal_type,
                 "direction": direction,
@@ -102,19 +103,18 @@ class SignalGenerator:
                 # Dispatch signal to alert system
                 await self.on_signal_generated(signal_data)
 
-                self.performance_metrics.stop_timer(
-                    "signal_generator", self.performance_metrics.start_timer("signal_generator"), True
-                )
+                self.performance_metrics.stop_timer("signal_generator", start_time, True)
                 return signal_data
             logger.info(
                 f"No actionable signal generated for {instrument_id} (Hold). Confidence: {confidence_score:.2f}"
             )
-            self.performance_metrics.stop_timer(
-                "signal_generator", self.performance_metrics.start_timer("signal_generator"), True
-            )
+            self.performance_metrics.stop_timer("signal_generator", start_time, True)
             return None
 
         except Exception as e:
+            # Ensure start_time is defined even if an error occurs before it's set
+            if "start_time" not in locals():
+                start_time = self.performance_metrics.start_timer("signal_generator")  # Fallback
             await self.error_handler.handle_error(
                 "signal_generator",
                 f"Error generating signal for {instrument_id}: {e}",
@@ -125,10 +125,5 @@ class SignalGenerator:
                     "error": str(e),
                 },
             )
-            self.performance_metrics.stop_timer(
-                "signal_generator", self.performance_metrics.start_timer("signal_generator"), False
-            )
+            self.performance_metrics.stop_timer("signal_generator", start_time, False)
             return None
-
-
-

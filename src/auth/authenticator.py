@@ -1,14 +1,11 @@
 from kiteconnect import KiteConnect
 from kiteconnect.exceptions import KiteException, NetworkException, TokenException
 
-from src.auth.token_manager import TokenManager
 from src.utils.config_loader import config_loader
 from src.utils.logger import LOGGER as logger
 
 # Load configuration
 config = config_loader.get_config()
-
-# No need for direct logging configuration here, it's handled by src.utils.logger
 
 
 class KiteAuthenticator:
@@ -66,7 +63,7 @@ class KiteAuthenticator:
         logger.info(f"Attempting to authenticate with request token: {request_token}")
         try:
             access_token = self.generate_session(request_token)
-            TokenManager().set_access_token(access_token)
+            self.token_manager.set_access_token(access_token)
             logger.info("Authentication successful and token stored in TokenManager.")
             return access_token
         except (TokenException, NetworkException, KiteException) as e:

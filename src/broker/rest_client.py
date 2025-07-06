@@ -23,8 +23,8 @@ class KiteRESTClient:
         self.api_key = config.broker.api_key
         self.token_manager = TokenManager()
         self.kite = self._initialize_kite_client()
-        self.historical_data_rate_limiter = RateLimiter(config.performance.rate_limiter.historical_data)
-        self.general_api_rate_limiter = RateLimiter(config.performance.rate_limiter.general_api)
+        self.historical_data_rate_limiter = RateLimiter("historical_data")
+        self.general_api_rate_limiter = RateLimiter("general_api")
 
     def _initialize_kite_client(self) -> KiteConnect:
         """

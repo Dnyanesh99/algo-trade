@@ -1,8 +1,5 @@
-import asyncio
 from datetime import datetime
 from typing import Any
-
-import asyncpg
 
 from src.database.db_utils import db_manager
 from src.database.models import LabelData
@@ -74,7 +71,9 @@ class LabelRepository:
             logger.error(f"Error inserting labels data for {instrument_id}: {e}")
             raise
 
-    async def get_labels(self, instrument_id: int, timeframe: str, start_time: datetime, end_time: datetime) -> list[LabelData]:
+    async def get_labels(
+        self, instrument_id: int, timeframe: str, start_time: datetime, end_time: datetime
+    ) -> list[LabelData]:
         """
         Fetches labels data for a given instrument and timeframe within a time range.
         """
@@ -86,7 +85,9 @@ class LabelRepository:
         """
         try:
             rows = await self.db_manager.fetch_rows(query, instrument_id, timeframe, start_time, end_time)
-            logger.debug(f"Fetched {len(rows)} label records for {instrument_id} ({timeframe}) from {start_time} to {end_time}.")
+            logger.debug(
+                f"Fetched {len(rows)} label records for {instrument_id} ({timeframe}) from {start_time} to {end_time}."
+            )
             return [LabelData.model_validate(row) for row in rows]
         except Exception as e:
             logger.error(f"Error fetching labels data for {instrument_id} ({timeframe}): {e}")

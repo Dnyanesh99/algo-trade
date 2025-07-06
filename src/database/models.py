@@ -1,7 +1,7 @@
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 
 class InstrumentData(BaseModel):
@@ -37,8 +37,8 @@ class FeatureData(BaseModel):
 
 class LabelData(BaseModel):
     ts: datetime
-    timeframe: str # e.g., '15min'
-    label: int # -1, 0, 1 for SELL, NEUTRAL, BUY
+    timeframe: str  # e.g., '15min'
+    label: int  # -1, 0, 1 for SELL, NEUTRAL, BUY
     tp_price: Optional[float] = None
     sl_price: Optional[float] = None
     exit_price: Optional[float] = None
@@ -53,10 +53,10 @@ class LabelData(BaseModel):
 
 class SignalData(BaseModel):
     ts: datetime
-    signal_type: str # e.g., 'Entry', 'Exit', 'Trend_Change'
-    direction: str # e.g., 'Long', 'Short', 'Neutral'
+    signal_type: str  # e.g., 'Entry', 'Exit', 'Trend_Change'
+    direction: str  # e.g., 'Long', 'Short', 'Neutral'
     confidence_score: Optional[float] = None
     source_feature_name: Optional[str] = None
     price_at_signal: float
     source_feature_value: Optional[float] = None
-    details: Optional[Dict[str, Any]] = None
+    details: Optional[dict[str, Any]] = None

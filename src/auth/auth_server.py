@@ -19,6 +19,11 @@ auth_success_event = threading.Event()
 auth_error_event = threading.Event()
 auth_result = {"success": False, "message": ""}
 
+# Global instances for authenticator and token manager
+# These must be defined at the module level to be accessible globally
+global_token_manager_instance = TokenManager()
+global_authenticator_instance = KiteAuthenticator(global_token_manager_instance)
+
 
 class FlaskServer(threading.Thread):
     def __init__(self, host: str, port: int) -> None:
@@ -41,6 +46,8 @@ class FlaskServer(threading.Thread):
 @app.route("/auth")  # type: ignore[misc]
 def auth_callback() -> str:
     global auth_result
+    global global_authenticator_instance
+    global global_token_manager_instance
     request_token = request.args.get("request_token")
     status = request.args.get("status")
     error = request.args.get("error")
@@ -49,9 +56,8 @@ def auth_callback() -> str:
     if status == "success" and request_token:
         logger.info(f"Received request token: {request_token}")
         try:
-            authenticator = KiteAuthenticator()
-            access_token = authenticator.authenticate(request_token)
-            TokenManager().set_access_token(access_token)
+            # Use the global authenticator instance
+            global_authenticator_instance.authenticate(request_token)
             auth_result["success"] = True
             auth_result["message"] = "Authentication successful! You can close this window."
             logger.info("Authentication flow completed successfully.")
@@ -82,7 +88,8 @@ def start_auth_server_and_wait() -> bool:
     server.daemon = True  # Allow the main program to exit even if the server is running
     server.start()
 
-    auth_url = KiteAuthenticator().generate_login_url()
+    # Use the global authenticator instance
+    auth_url = global_authenticator_instance.generate_login_url()
     logger.info(f"Opening browser for authentication: {auth_url}")
     webbrowser.open(auth_url)
 
@@ -97,5 +104,3 @@ def start_auth_server_and_wait() -> bool:
     server.join()  # Ensure the server thread has completely shut down
 
     return bool(auth_result["success"])
-
-

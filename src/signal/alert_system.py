@@ -1,11 +1,7 @@
-import asyncio
 from typing import Any
 
 from src.state.error_handler import ErrorHandler
-from src.utils.config_loader import config_loader
 from src.utils.logger import LOGGER as logger
-
-config = config_loader.get_config()
 
 
 class AlertSystem:
@@ -27,7 +23,7 @@ class AlertSystem:
                 f"SIGNAL: {signal.get('direction')} {signal.get('instrument_id')} "
                 f"@ {signal.get('price_at_signal'):.2f} "
                 f"(Confidence: {signal.get('confidence_score'):.2f}, Type: {signal.get('signal_type')}) "
-                f"at {signal.get('ts')}"
+                f"at {signal.get('timestamp')}"
             )
             logger.info(signal_message)
 
@@ -39,6 +35,3 @@ class AlertSystem:
                 f"Error dispatching signal: {e}",
                 {"signal": signal, "error": str(e)},
             )
-
-
-

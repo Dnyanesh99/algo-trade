@@ -2,12 +2,9 @@ from typing import Any
 
 import pandas as pd
 
-from src.utils.config_loader import config_loader
 from src.utils.data_quality import DataQualityReport, DataValidator
 from src.utils.logger import LOGGER as logger
 from src.utils.market_calendar import MarketCalendar
-
-config = config_loader.get_config()
 
 
 class HistoricalProcessor:
@@ -35,9 +32,6 @@ class HistoricalProcessor:
         trading_mask = self.market_calendar.get_trading_mask(df["timestamp"])
 
         filtered_df = df[trading_mask].copy()
-
-        # Clean up temporary columns
-        filtered_df = filtered_df.drop(columns=["date", "time", "weekday"])
 
         rows_removed = initial_rows - len(filtered_df)
         if rows_removed > 0:
@@ -76,6 +70,3 @@ class HistoricalProcessor:
 
         logger.info(f"Successfully processed historical data for {instrument_token}. Valid rows: {len(df_filtered)}")
         return df_filtered, quality_report
-
-
-

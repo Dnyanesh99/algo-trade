@@ -80,14 +80,23 @@ class TimeSynchronizer:
         # Calculate next boundary
         current_minute = current_time.minute
 
-        # Find next interval boundary
-        minutes_into_interval = current_minute % self.candle_interval_minutes
+        # Calculate minutes to the next multiple of candle_interval_minutes
+        minutes_to_add = self.candle_interval_minutes - (current_minute % self.candle_interval_minutes)
 
-        if minutes_to_next_boundary == self.candle_interval_minutes:
-            # We're exactly at a boundary, use next one
-            minutes_to_next_boundary = self.candle_interval_minutes
+        # If current_minute is already a multiple of candle_interval_minutes (e.g., 10:15 for 15-min)
+        # and we are exactly at 0 seconds, the next boundary is current time + interval.
+        # Otherwise, if we are past 0 seconds, the next boundary is the current time + interval.
+        if minutes_to_add == self.candle_interval_minutes:
+            minutes_to_add = 0  # This means we are exactly on a boundary, so next boundary is current time + interval
 
-        return current_time.replace(second=0, microsecond=0) + timedelta(minutes=minutes_to_next_boundary)
+        next_boundary = current_time.replace(second=0, microsecond=0) + timedelta(minutes=minutes_to_add)
+
+        # If the calculated next_boundary is in the past or exactly now (and we want the *next* one)
+        # and we are not exactly at the start of the current boundary (i.e., seconds > 0 or microseconds > 0)
+        if next_boundary <= current_time and (current_time.second > 0 or current_time.microsecond > 0):
+            next_boundary += timedelta(minutes=self.candle_interval_minutes)
+
+        return next_boundary
 
     def get_sync_target_time(self, boundary_time: datetime) -> datetime:
         """
@@ -161,8 +170,8 @@ class TimeSynchronizer:
                     raise RuntimeError(f"Time synchronization failed after {self.max_sync_attempts} attempts") from e
                 await asyncio.sleep(0.1)
 
-        # Should never reach here
-        raise RuntimeError("Unexpected synchronization failure")
+        # This should never be reached due to the logic above, but added for completeness
+        raise RuntimeError("Synchronization failed - unexpected code path")
 
     def is_at_candle_boundary(self, check_time: Optional[datetime] = None, tolerance_seconds: float = 1.0) -> bool:
         """
@@ -187,6 +196,3 @@ class TimeSynchronizer:
         dist_to_prev = abs((check_time - prev_boundary).total_seconds())
 
         return min(dist_to_next, dist_to_prev) <= tolerance_seconds
-
-
-

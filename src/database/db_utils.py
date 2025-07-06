@@ -1,5 +1,4 @@
 import asyncio
-import time
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from typing import Any, Optional
@@ -22,11 +21,12 @@ class DatabaseManager:
     _instance: Optional["DatabaseManager"] = None
     _pool: Optional[asyncpg.Pool] = None
     _lock = asyncio.Lock()
-    _initialized: bool = False # Add initialized flag
 
     def __new__(cls) -> "DatabaseManager":
         if cls._instance is None:
             cls._instance = super().__new__(cls)
+            cls._instance._pool = None  # Ensure pool is None initially
+            cls._instance._initialized = False  # Initialize flag
         return cls._instance
 
     async def initialize(self) -> None:
@@ -35,7 +35,7 @@ class DatabaseManager:
         This method should be called once at application startup.
         """
         async with self._lock:
-            if not self._initialized:
+            if self._pool is None:
                 logger.info("Initializing database connection pool...")
                 db_config = config.database
                 try:
@@ -74,7 +74,7 @@ class DatabaseManager:
         Provides an asynchronous context manager for acquiring a database connection
         from the pool. The connection is released back to the pool automatically.
         """
-        if not self._initialized or self._pool is None:
+        if self._pool is None:
             logger.error("DatabaseManager not initialized. Call .initialize() first.")
             raise RuntimeError("DatabaseManager not initialized.")
 

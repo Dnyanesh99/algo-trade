@@ -1,7 +1,7 @@
 import asyncio
 import json
 from collections.abc import Coroutine
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -33,7 +33,44 @@ class CandleBuffer:
         self._persistence_task: Optional[asyncio.Task] = None
         self._load_persisted_state()
         logger.info(f"CandleBuffer initialized for timeframes: {self.timeframes}")
-        # Call start_persistence() externally after initialization if periodic persistence is desired.
+
+    async def start_persistence_task(self) -> None:
+        """
+        Starts a background task to periodically persist the partial candle state.
+        """
+        if self._persistence_task is None or self._persistence_task.done():
+            self._persistence_task = asyncio.create_task(self._run_persistence_loop())
+            logger.info("CandleBuffer persistence task started.")
+
+    async def stop_persistence_task(self) -> None:
+        """
+        Stops the background persistence task gracefully.
+        """
+        if self._persistence_task:
+            logger.info("Stopping CandleBuffer persistence task...")
+            self._persistence_task.cancel()
+            try:
+                await self._persistence_task
+            except asyncio.CancelledError:
+                logger.info("CandleBuffer persistence task stopped successfully.")
+            except Exception as e:
+                logger.error(f"Error stopping CandleBuffer persistence task: {e}")
+            finally:
+                self._persistence_task = None
+
+    async def _run_persistence_loop(self) -> None:
+        """
+        The main loop for the background persistence task.
+        """
+        while True:
+            try:
+                await asyncio.sleep(self.persistence_interval)
+                self._persist_state()
+            except asyncio.CancelledError:
+                logger.info("CandleBuffer persistence loop cancelled.")
+                break
+            except Exception as e:
+                logger.error(f"Error in CandleBuffer persistence loop: {e}", exc_info=True)
 
     def _load_persisted_state(self) -> None:
         if self.persistence_path.exists():
@@ -197,8 +234,5 @@ class CandleBuffer:
                         logger.info(f"Flushing {tf}-min candle for {instrument_token} at {candle_data['start_time']}.")
                         await self.on_candle_complete_callback(candle_data)
                         del self._partial_candles[tf][instrument_token]
-            self._persist_state() # Ensure final state is persisted on flush
+            self._persist_state()  # Ensure final state is persisted on flush
             logger.info("All partial candles flushed.")
-
-
-

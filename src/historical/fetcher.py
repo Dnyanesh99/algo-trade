@@ -57,7 +57,9 @@ class HistoricalFetcher:
             while retries < self.max_retries and not success:
                 try:
                     async with self.rate_limiter:
-                        logger.info(f"Fetching chunk for {instrument_token}: {from_date_str} to {to_date_str} (Attempt {retries + 1}/{self.max_retries})")
+                        logger.info(
+                            f"Fetching chunk for {instrument_token}: {from_date_str} to {to_date_str} (Attempt {retries + 1}/{self.max_retries})"
+                        )
                         candles = await self.rest_client.get_historical_data(
                             instrument_token, from_date_str, to_date_str, self.historical_interval
                         )
@@ -73,7 +75,7 @@ class HistoricalFetcher:
                     retries += 1
                     logger.error(
                         f"Error fetching chunk for {instrument_token} from {from_date_str} to {to_date_str}: {e}. "
-                        f"Retrying in {2 ** retries} seconds... (Attempt {retries}/{self.max_retries})",
+                        f"Retrying in {2**retries} seconds... (Attempt {retries}/{self.max_retries})",
                         exc_info=True,
                     )
                     await asyncio.sleep(2**retries)  # Exponential backoff
@@ -88,6 +90,3 @@ class HistoricalFetcher:
 
         logger.info(f"Finished historical data fetch for {instrument_token}. Total candles: {len(all_candles)}")
         return all_candles
-
-
-

@@ -1,8 +1,5 @@
-import asyncio
-from datetime import datetime, timedelta
-from typing import Any, Optional
-
-import asyncpg
+from datetime import datetime
+from typing import Optional
 
 from src.database.db_utils import db_manager
 from src.database.models import SignalData

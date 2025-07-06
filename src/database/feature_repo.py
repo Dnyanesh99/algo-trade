@@ -1,6 +1,5 @@
-import asyncio
 from datetime import datetime
-from typing import Any, Optional
+from typing import Optional
 
 import asyncpg
 
@@ -36,10 +35,7 @@ class FeatureRepository:
             ON CONFLICT (instrument_id, timeframe, feature_name, ts) DO UPDATE
             SET feature_value = EXCLUDED.feature_value
         """
-        records = [
-            (d.ts, instrument_id, timeframe, d.feature_name, d.feature_value)
-            for d in features_data
-        ]
+        records = [(d.ts, instrument_id, timeframe, d.feature_name, d.feature_value) for d in features_data]
 
         try:
             async with self.db_manager.transaction() as conn:
@@ -75,7 +71,7 @@ class FeatureRepository:
 
     async def get_latest_features(
         self, instrument_id: int, timeframe: str, num_features: Optional[int] = None
-    ) -> list[asyncpg.Record]:
+    ) -> list[FeatureData]:
         """
         Fetches the latest features for a given instrument and timeframe.
         If num_features is specified, returns that many latest feature sets.
@@ -95,7 +91,7 @@ class FeatureRepository:
                 rows = await self.db_manager.fetch_rows(query, instrument_id, timeframe, num_features)
                 rows.reverse()  # Return in chronological order
                 logger.debug(f"Fetched {len(rows)} latest feature records for {instrument_id} ({timeframe}).")
-                return rows
+                return [FeatureData.model_validate(row) for row in rows]
             except Exception as e:
                 logger.error(f"Error fetching latest features for {instrument_id} ({timeframe}): {e}")
                 raise
@@ -112,7 +108,7 @@ class FeatureRepository:
             try:
                 rows = await self.db_manager.fetch_rows(query, instrument_id, timeframe)
                 logger.debug(f"Fetched all features for the latest timestamp for {instrument_id} ({timeframe}).")
-                return rows
+                return [FeatureData.model_validate(row) for row in rows]
             except Exception as e:
                 logger.error(f"Error fetching latest features for {instrument_id} ({timeframe}): {e}")
                 raise

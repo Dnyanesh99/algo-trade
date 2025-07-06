@@ -40,7 +40,7 @@ class RateLimiter:
             return
 
         self.endpoint_name = endpoint_name
-        self.rate_limit = config.api_rate_limits.get(endpoint_name)
+        self.rate_limit = getattr(config.api_rate_limits, endpoint_name, None)
 
         # Set limits from configuration or raise error if not found
         if not self.rate_limit:

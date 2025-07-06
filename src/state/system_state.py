@@ -1,11 +1,7 @@
 import threading
 from typing import Any, Optional
 
-from src.utils.config_loader import config_loader
 from src.utils.logger import LOGGER as logger  # Centralized logger
-
-# Load configuration
-config = config_loader.get_config()
 
 # No need for direct logging configuration here, it's handled by src.utils.logger
 
@@ -79,6 +75,3 @@ class SystemState:
             return health
         logger.debug(f"Retrieved all component health: {self._component_health}")
         return self._component_health
-
-
-

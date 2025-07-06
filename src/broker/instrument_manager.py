@@ -49,18 +49,18 @@ class InstrumentManager:
                 ):
                     # Prepare data for DB insertion/update
                     db_data = {
-                        "instrument_token": broker_inst["instrument_token"],
+                        "instrument_token": broker_inst.get("instrument_token"),
                         "exchange_token": broker_inst.get("exchange_token"),
-                        "tradingsymbol": broker_inst["tradingsymbol"],
+                        "tradingsymbol": broker_inst.get("tradingsymbol"),
                         "name": broker_inst.get("name"),
                         "last_price": broker_inst.get("last_price"),
                         "expiry": broker_inst.get("expiry"),
                         "strike": broker_inst.get("strike"),
                         "tick_size": broker_inst.get("tick_size"),
                         "lot_size": broker_inst.get("lot_size"),
-                        "instrument_type": broker_inst["instrument_type"],
+                        "instrument_type": broker_inst.get("instrument_type"),
                         "segment": broker_inst.get("segment"),
-                        "exchange": broker_inst["exchange"],
+                        "exchange": broker_inst.get("exchange"),
                     }
 
                     # Check if instrument already exists in DB

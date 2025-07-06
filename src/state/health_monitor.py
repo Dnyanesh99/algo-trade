@@ -2,6 +2,8 @@ import asyncio
 from datetime import datetime, timedelta
 from typing import Optional
 
+import pytz
+
 from src.broker.websocket_client import KiteWebSocketClient
 from src.database.db_utils import DatabaseManager
 from src.state.system_state import SystemState
@@ -67,11 +69,7 @@ class HealthMonitor:
         """
         Checks the freshness of the last received data for all tracked instruments.
         """
-        current_time = datetime.now(
-            self.system_state.get_component_health("MarketCalendar").tz
-            if self.system_state.get_component_health("MarketCalendar")
-            else None
-        )
+        current_time = datetime.now(pytz.timezone(config.system.timezone))
 
         for instrument_token, last_ts in self._last_data_timestamp.items():
             if current_time - last_ts > self.data_freshness_threshold:
@@ -103,13 +101,19 @@ class HealthMonitor:
             self._monitor_task = asyncio.create_task(self._monitor_health())
             logger.info("Health monitoring started.")
 
-    def stop_monitoring(self) -> None:
+    async def stop_monitoring(self) -> None:
         """
-        Stops the background health monitoring task.
+        Stops the background health monitoring task gracefully.
         """
         if self._monitor_task:
+            logger.info("Stopping health monitor...")
             self._monitor_task.cancel()
-            logger.info("Health monitoring stopped.")
 
-
-
+            try:
+                await self._monitor_task
+            except asyncio.CancelledError:
+                logger.info("Health monitor stopped successfully")
+            except Exception as e:
+                logger.error(f"Error stopping health monitor: {e}")
+            finally:
+                self._monitor_task = None

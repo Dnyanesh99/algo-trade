@@ -6,6 +6,7 @@ Runs database migrations in sequence to ensure proper schema setup.
 """
 
 import asyncio
+import time
 from pathlib import Path
 
 from src.database.db_utils import db_manager
@@ -72,7 +73,7 @@ class DatabaseMigrator:
                             raise
 
                 # Record successful migration
-                execution_time = int((asyncio.get_event_loop().time() - start_time) * 1000)
+                execution_time = int((time.monotonic() - start_time) * 1000)
                 await conn.execute(
                     "INSERT INTO schema_migrations (version, execution_time_ms) VALUES ($1, $2)",
                     version,
@@ -145,6 +146,3 @@ class DatabaseMigrator:
             version = migration_file.stem
             status = "✅ Applied" if version in applied_migrations else "⏳ Pending"
             logger.info(f"  {version}: {status}")
-
-
-

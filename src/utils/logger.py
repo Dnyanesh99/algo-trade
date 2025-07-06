@@ -51,7 +51,7 @@ class LoggerSetup:
             backtrace=True,
             diagnose=True,
             catch=True,
-            serialize=True, # Changed to True for structured logging
+            serialize=True,  # Changed to True for structured logging
         )
 
         # Add console logging for development/debugging
@@ -87,7 +87,7 @@ class LoggerSetup:
                 logger.opt(depth=depth, exception=record.exc_info).log(level, record.getMessage())
 
         # Replace standard logging
-        logging.basicConfig(handlers=[InterceptHandler()], level=0, force=True)
+        logging.basicConfig(handlers=[InterceptHandler()], level=getattr(logging, config.logging.level), force=True)
 
         # Disable some noisy loggers
         logging.getLogger("urllib3").setLevel(logging.WARNING)

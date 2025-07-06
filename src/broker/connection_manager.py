@@ -27,9 +27,6 @@ class ConnectionManager:
         self._monitor_task: Optional[asyncio.Task] = None
         self._monitor_interval = config.broker.connection_manager.monitor_interval
 
-        # Load values from config
-        self._monitor_interval = config.broker.connection_manager.monitor_interval
-
         # Assign KiteTicker callbacks to be handled by ConnectionManager
         self.websocket_client.on_reconnect_callback = self._on_reconnect_from_kws
         self.websocket_client.on_noreconnect_callback = self._on_noreconnect_from_kws
@@ -55,13 +52,22 @@ class ConnectionManager:
             self._monitor_task = asyncio.create_task(self._monitor_connection())
             logger.info("Connection monitoring started.")
 
-    def stop_monitoring(self) -> None:
+    async def stop_monitoring(self) -> None:
         """
-        Stops the background task for connection monitoring.
+        Stops the background task for connection monitoring gracefully.
         """
         if self._monitor_task:
+            logger.info("Stopping connection monitor...")
             self._monitor_task.cancel()
-            logger.info("Connection monitoring stopped.")
+
+            try:
+                await self._monitor_task
+            except asyncio.CancelledError:
+                logger.info("Connection monitor stopped successfully")
+            except Exception as e:
+                logger.error(f"Error stopping connection monitor: {e}")
+            finally:
+                self._monitor_task = None
 
     def _on_reconnect_from_kws(self, attempt_count: int) -> None:
         """

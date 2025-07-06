@@ -1,8 +1,5 @@
-import asyncio
 from datetime import datetime
-from typing import Any, Optional
-
-import asyncpg
+from typing import Optional
 
 from src.database.db_utils import db_manager
 from src.database.models import OHLCVData
@@ -97,24 +94,21 @@ class OHLCVRepository:
             if row:
                 logger.debug(f"Fetched latest {timeframe} candle for {instrument_id}: {row['ts']}")
                 return OHLCVData.model_validate(row)
-            else:
-                logger.debug(f"No latest {timeframe} candle found for {instrument_id}.")
-                return None
+            logger.debug(f"No latest {timeframe} candle found for {instrument_id}.")
+            return None
         except Exception as e:
             logger.error(f"Error fetching latest candle for {instrument_id} ({timeframe}): {e}")
             raise
 
-    async def get_ohlcv_data_for_features(self, instrument_id: int, timeframe: str, limit: int) -> list[OHLCVData]:
+    async def get_ohlcv_data_for_features(self, instrument_id: int, timeframe: int, limit: int) -> list[OHLCVData]:
         """
         Fetches the most recent OHLCV data points up to a specified limit,
         ordered by timestamp ascending, suitable for feature calculation.
         """
-        table_name = f"ohlcv_{timeframe}"
+        table_name = f"ohlcv_{timeframe}min"
         query = f"SELECT ts, open, high, low, close, volume FROM {table_name} WHERE instrument_id = $1 ORDER BY ts DESC LIMIT $2"
         try:
             rows = await self.db_manager.fetch_rows(query, instrument_id, limit)
-            # Reverse the order to be chronological for feature calculation
-            rows.reverse()
             logger.debug(f"Fetched {len(rows)} recent {timeframe} candles for {instrument_id} for feature calculation.")
             return [OHLCVData.model_validate(row) for row in rows]
         except Exception as e:

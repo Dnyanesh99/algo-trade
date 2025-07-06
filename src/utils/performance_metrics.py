@@ -159,9 +159,10 @@ class PerformanceMetrics:
                 logger.info("All performance metrics reset.")
 
     @contextmanager
-    def measure_execution(self, operation_name: str, success_on_exit: bool = True) -> Any:
+    def measure_execution(self, operation_name: str) -> Any:
         """
         Context manager to measure the execution time of a block of code.
+        Assumes success if no exception is raised within the block.
         Usage:
             with performance_metrics.measure_execution("my_operation"):
                 # code to measure
@@ -173,11 +174,8 @@ class PerformanceMetrics:
             self.stop_timer(operation_name, start_time, success=False)
             raise e
         else:
-            self.stop_timer(operation_name, start_time, success=success_on_exit)
+            self.stop_timer(operation_name, start_time, success=True)
 
 
 # Singleton instance
 performance_metrics = PerformanceMetrics()
-
-
-

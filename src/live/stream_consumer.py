@@ -1,16 +1,10 @@
 import asyncio
-from datetime import datetime
-from typing import Any, Optional
-
-import pytz
+from typing import Optional
 
 from src.live.candle_buffer import CandleBuffer
 from src.live.tick_queue import TickQueue
 from src.live.tick_validator import TickValidator
-from src.utils.config_loader import config_loader
 from src.utils.logger import LOGGER as logger
-
-config = config_loader.get_config()
 
 
 class StreamConsumer:
@@ -43,33 +37,6 @@ class StreamConsumer:
                     # So, we just need to validate and pass to candle_buffer.
                     # If raw binary parsing was needed, it would happen here.
                     if self.tick_validator.validate_tick(tick):
-                        # Ensure timestamp is a datetime object and UTC localized
-                        timestamp = tick["timestamp"]
-                        if isinstance(timestamp, (int, float)):
-                            # Assuming Unix timestamp in seconds
-                            timestamp = datetime.fromtimestamp(timestamp, tz=datetime.now().astimezone().tzinfo) # Localize to system timezone first
-                        elif isinstance(timestamp, str):
-                            try:
-                                timestamp = datetime.fromisoformat(timestamp)
-                            except ValueError:
-                                logger.error(
-                                    f"StreamConsumer: Invalid timestamp string format: {timestamp}. Skipping tick."
-                                )
-                                continue
-
-                        if not isinstance(timestamp, datetime):
-                            logger.error(f"StreamConsumer: Unexpected timestamp type after conversion: {type(timestamp)}. Skipping tick.")
-                            continue
-
-                        # Ensure timestamp is UTC for consistency in the pipeline
-                        if timestamp.tzinfo is None:
-                            # Assume it's IST if no timezone info, then convert to UTC
-                            ist_tz = config_loader.get_config().system.timezone
-                            timestamp = pytz.timezone(ist_tz).localize(timestamp).astimezone(pytz.utc)
-                        else:
-                            timestamp = timestamp.astimezone(pytz.utc)
-
-                        tick["timestamp"] = timestamp
                         await self.candle_buffer.process_tick(tick)
                     else:
                         logger.warning(f"StreamConsumer: Invalid tick received, skipping: {tick}")
@@ -105,6 +72,3 @@ class StreamConsumer:
                 logger.error(f"StreamConsumer: Error stopping consumption task: {e}")
             finally:
                 self._consumer_task = None
-
-
-

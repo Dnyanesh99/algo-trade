@@ -17,12 +17,12 @@ class TokenManager:
         with cls._lock:
             if cls._instance is None:
                 cls._instance = super().__new__(cls)
+                cls._instance._access_token = None
                 logger.info("TokenManager initialized.")
         return cls._instance
 
     def __init__(self) -> None:
-        if not hasattr(self, "_access_token"):
-            self._access_token: Optional[str] = None
+        pass
 
     def set_access_token(self, token: str) -> None:
         """

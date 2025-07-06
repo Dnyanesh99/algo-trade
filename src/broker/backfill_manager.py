@@ -4,11 +4,7 @@ from typing import Any, Optional
 from kiteconnect.exceptions import KiteException, NetworkException, TokenException
 
 from src.broker.rest_client import KiteRESTClient
-from src.utils.config_loader import config_loader
 from src.utils.logger import LOGGER as logger  # Centralized logger
-
-# Load configuration
-config = config_loader.get_config()
 
 
 class BackfillManager:

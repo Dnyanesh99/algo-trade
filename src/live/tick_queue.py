@@ -1,5 +1,4 @@
 import asyncio
-from datetime import datetime
 from typing import Any, ClassVar, Optional
 
 from src.utils.config_loader import config_loader
@@ -56,7 +55,9 @@ class TickQueue:
                     "Tick queue is full while putting multiple ticks. Dropping remaining ticks in this batch."
                 )
                 break  # Stop putting more ticks from this batch if queue is full
-        logger.debug(f"Attempted to put {len(ticks)} ticks, successfully put {successfully_put}. Current queue size: {self._queue.qsize()}")
+        logger.debug(
+            f"Attempted to put {len(ticks)} ticks, successfully put {successfully_put}. Current queue size: {self._queue.qsize()}"
+        )
 
     async def get(self) -> dict[str, Any]:
         """
@@ -99,6 +100,3 @@ class TickQueue:
 
 # Singleton instance
 tick_queue = TickQueue()
-
-
-

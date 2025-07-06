@@ -146,7 +146,9 @@ class KiteWebSocketClient:
             }
             selected_mode = mode_map.get(config.broker.websocket_mode.upper())
             if selected_mode is None:
-                logger.warning(f"Invalid WebSocket mode configured: {config.broker.websocket_mode}. Defaulting to FULL.")
+                logger.warning(
+                    f"Invalid WebSocket mode configured: {config.broker.websocket_mode}. Defaulting to FULL."
+                )
                 selected_mode = self.kws.MODE_FULL
             self.kws.set_mode(selected_mode, instrument_tokens)
         else:

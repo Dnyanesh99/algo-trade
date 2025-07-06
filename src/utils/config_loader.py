@@ -18,15 +18,8 @@ class ConnectionManagerConfig(BaseModel):
     monitor_interval: int = Field(gt=0)
 
 
-class ConnectionManagerConfig(BaseModel):
-    max_reconnect_attempts: int = Field(gt=0)
-    initial_reconnect_delay: int = Field(gt=0)
-    heartbeat_timeout: int = Field(gt=0)
-    monitor_interval: int = Field(gt=0)
-
-
 class BrokerConfig(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix='KITE_', extra='ignore') # KITE_API_KEY, KITE_API_SECRET
+    model_config = SettingsConfigDict(env_prefix="KITE_", extra="ignore")  # KITE_API_KEY, KITE_API_SECRET
     api_key: str
     api_secret: str
     redirect_url: str
@@ -153,7 +146,7 @@ class StorageConfig(BaseModel):
 
 
 class DatabaseConfig(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix='DB_', extra='ignore')
+    model_config = SettingsConfigDict(env_prefix="DB_", extra="ignore")
     host: str
     port: int
     dbname: str
@@ -299,27 +292,23 @@ class SignalGenerationConfig(BaseModel):
 
 
 class DataPipelineConfig(BaseModel):
-    historical_data_max_days_per_request: int = Field(..., gt=0)
+    historical_data_max_days_per_request: int = Field(..., gt=0, le=60)
+
+    @model_validator(mode="after")
+    def check_historical_data_limit(self) -> "DataPipelineConfig":
+        if self.historical_data_max_days_per_request > 60:
+            raise ValueError(
+                "historical_data_max_days_per_request cannot exceed 60 days due to KiteConnect API limits."
+            )
+        return self
 
 
 class LiveAggregatorConfig(BaseModel):
     max_partial_candles: int = Field(..., gt=0)
     partial_candle_cleanup_hours: int = Field(..., gt=0)
-    health_check_success_rate_threshold: float = Field(..., ge=0, le=1) # Changed to 0-1
+    health_check_success_rate_threshold: float = Field(..., ge=0, le=1)  # Changed to 0-1
     health_check_avg_processing_time_ms_threshold: float = Field(..., ge=0)
     health_check_validation_failures_threshold: float = Field(..., ge=0, le=1)
-
-
-class ApiRateLimit(BaseModel):
-    limit: int = Field(gt=0)
-    interval: int = Field(gt=0)
-
-
-class ApiRateLimits(BaseModel):
-    historical_data: ApiRateLimit
-    websocket_subscriptions: ApiRateLimit
-    order_placement: ApiRateLimit
-    general_api: ApiRateLimit
 
 
 class ApiRateLimit(BaseModel):
@@ -342,7 +331,7 @@ class AppConfig(BaseSettings):
     logging: LoggingConfig
     trading: TradingConfig
     performance: PerformanceConfig
-    api_rate_limits: ApiRateLimits # Added new field
+    api_rate_limits: ApiRateLimits
     storage: StorageConfig
     database: DatabaseConfig
     example: ExampleConfig

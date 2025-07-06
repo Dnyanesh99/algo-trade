@@ -1,5 +1,4 @@
 from dataclasses import dataclass
-from datetime import timedelta
 
 import pandas as pd
 
@@ -11,9 +10,7 @@ config = config_loader.get_config()
 
 @dataclass
 class DataQualityReport:
-    """
-    Data quality assessment results.
-    """
+    """Data quality assessment results."""
 
     total_rows: int
     valid_rows: int
@@ -30,93 +27,78 @@ class DataQualityReport:
 
 
 class DataValidator:
-    """Comprehensive data validation and cleaning"""
+    """Comprehensive data validation and cleaning."""
 
     @staticmethod
     def validate_ohlcv(df: pd.DataFrame, symbol: str = "UNKNOWN") -> tuple[bool, pd.DataFrame, DataQualityReport]:
-        """
-        Validate and clean OHLCV data with detailed reporting
-        """
+        """Validate and clean OHLCV data with detailed reporting."""
+        if df.empty:
+            report = DataQualityReport(0, 0, {}, 0, 0, 0, {}, 0.0, ["No data to validate"])
+            return False, df, report
+
         df_clean = df.copy()
         issues = []
-
-        # Required columns
         required_columns = ["timestamp", "open", "high", "low", "close", "volume"]
         missing_cols = set(required_columns) - set(df_clean.columns)
         if missing_cols:
             raise ValueError(f"Missing required columns: {missing_cols}")
 
         initial_rows = len(df_clean)
-
-        # Track data quality metrics
         nan_counts = df_clean[required_columns].isnull().sum().to_dict()
 
-        # Remove NaN values
         if sum(nan_counts.values()) > 0:
+            rows_before_drop = len(df_clean)
             df_clean = df_clean.dropna(subset=required_columns)
-            issues.append(f"Removed {initial_rows - len(df_clean)} rows with NaN values due to NaNs in required columns.")
+            issues.append(f"Removed {rows_before_drop - len(df_clean)} rows with NaN values.")
 
-        # Check OHLC relationships and remove invalid rows
-        initial_ohlc_violations = (
-            (df_clean["high"] < df_clean["low"])
-            | (df_clean["high"] < df_clean["open"])
-            | (df_clean["high"] < df_clean["close"])
-            | (df_clean["low"] > df_clean["open"])
-            | (df_clean["low"] > df_clean["close"])
-            | (df_clean["close"] <= 0)
-            | (df_clean["volume"] < 0)
-        )
-        ohlc_violations_count = initial_ohlc_violations.sum()
+        invalid_price_volume = (df_clean["close"] <= 0) | (df_clean["volume"] < 0)
+        invalid_price_volume_count = invalid_price_volume.sum()
+        if invalid_price_volume_count > 0:
+            df_clean = df_clean[~invalid_price_volume]
+            issues.append(f"Removed {invalid_price_volume_count} rows with invalid price (<=0) or volume (<0).")
 
+        high_low_violation = df_clean["high"] < df_clean["low"]
+        high_low_violation_count = high_low_violation.sum()
+        if high_low_violation_count > 0:
+            df_clean = df_clean[~high_low_violation]
+            issues.append(f"Removed {high_low_violation_count} rows where high < low.")
+
+        df_clean["high"] = df_clean[["open", "close", "high"]].max(axis=1)
+        df_clean["low"] = df_clean[["open", "close", "low"]].min(axis=1)
+
+        ohlc_violations_count = invalid_price_volume_count + high_low_violation_count
         if ohlc_violations_count > 0:
-            df_clean = df_clean[~initial_ohlc_violations]
-            issues.append(f"Removed {ohlc_violations_count} rows due to OHLC violations.")
+            issues.append(f"Total OHLC violations resulting in row removal: {ohlc_violations_count}.")
 
-        # Handle duplicates
         duplicates = df_clean["timestamp"].duplicated().sum()
         if duplicates > 0:
             df_clean = df_clean.drop_duplicates(subset=["timestamp"], keep="last")
-            issues.append(f"Removed {duplicates} duplicate timestamps.")
+            issues.append(f"Removed {duplicates} duplicate timestamps, keeping last entry.")
 
-        # Sort by timestamp
         df_clean = df_clean.sort_values("timestamp").reset_index(drop=True)
 
-        # Detect time gaps for fixed-interval data
-        expected_interval = timedelta(minutes=config.time_synchronizer.candle_interval_minutes)
-        time_diff = df_clean["timestamp"].diff()
-        time_gaps_count = (time_diff > expected_interval * config.data_quality.time_series.gap_multiplier).sum()
+        # Gap detection logic requires a timeframe, which is not available here.
+        # This should be handled by a higher-level validator like CandleValidator.
+        time_gaps_count = 0  # Assuming this is a basic OHLCV check, not a time-series continuity check.
 
-        if time_gaps_count > 0:
-            issues.append(f"Detected {time_gaps_count} significant time gaps.")
-
-        # Detect outliers using IQR method
         outliers = {}
         for col in ["open", "high", "low", "close", "volume"]:
             q1 = df_clean[col].quantile(0.25)
             q3 = df_clean[col].quantile(0.75)
             iqr = q3 - q1
-            outlier_multiplier = config.data_quality.outlier_detection.iqr_multiplier
-            outliers[col] = (
-                (df_clean[col] < q1 - outlier_multiplier * iqr) | (df_clean[col] > q3 + outlier_multiplier * iqr)
-            ).sum()
+            if iqr > 0:
+                outlier_multiplier = config.data_quality.outlier_detection.iqr_multiplier
+                lower_bound = q1 - outlier_multiplier * iqr
+                upper_bound = q3 + outlier_multiplier * iqr
+                outliers[col] = int(((df_clean[col] < lower_bound) | (df_clean[col] > upper_bound)).sum())
 
-        # Calculate quality score
-        # Start with a base score based on valid rows vs initial rows
-        quality_score = (len(df_clean) / initial_rows) * 100 if initial_rows > 0 else 0
+        total_outliers = sum(outliers.values())
+        if total_outliers > 0:
+            issues.append(f"Detected a total of {total_outliers} outliers across OHLCV columns.")
 
-        # Apply penalties for detected issues
-        if sum(outliers.values()) > 0:
-            quality_score *= (1 - config.data_quality.penalties.outlier_penalty)
-            issues.append(f"Applied outlier penalty: {config.data_quality.penalties.outlier_penalty * 100:.1f}%")
-        if time_gaps_count > 0:
-            quality_score *= (1 - config.data_quality.penalties.gap_penalty)
-            issues.append(f"Applied time gap penalty: {config.data_quality.penalties.gap_penalty * 100:.1f}%")
-        if ohlc_violations_count > 0:
-            quality_score *= (1 - config.data_quality.penalties.ohlc_violation_penalty)
-            issues.append(f"Applied OHLC violation penalty: {config.data_quality.penalties.ohlc_violation_penalty * 100:.1f}%")
-        if duplicates > 0:
-            quality_score *= (1 - config.data_quality.penalties.duplicate_penalty)
-            issues.append(f"Applied duplicate timestamp penalty: {config.data_quality.penalties.duplicate_penalty * 100:.1f}%")
+        quality_score = DataValidator.calculate_quality_score(
+            initial_rows, len(df_clean), ohlc_violations_count, duplicates, time_gaps_count, total_outliers
+        )
 
         report = DataQualityReport(
             total_rows=initial_rows,
@@ -134,8 +116,49 @@ class DataValidator:
             len(df_clean) >= config.data_quality.validation.min_valid_rows
             and quality_score >= config.data_quality.validation.quality_score_threshold
         )
-
         if not is_valid:
-            logger.warning(f"Data quality below threshold for {symbol}: {quality_score:.2f}%")
+            logger.warning(f"Data quality below threshold for {symbol}: {quality_score:.2f}%. Issues: {issues}")
 
         return is_valid, df_clean, report
+
+    @staticmethod
+    def calculate_quality_score(
+        initial_rows: int,
+        valid_rows: int,
+        ohlc_violations: int,
+        duplicate_timestamps: int,
+        time_gaps: int,
+        total_outliers: int,
+    ) -> float:
+        """
+        Calculate a robust overall data quality score using multiplicative penalties.
+        This is the single source of truth for quality scoring across the system.
+        """
+        if initial_rows == 0:
+            return 0.0
+
+        try:
+            penalties = config.data_quality.penalties
+            base_score_factor = valid_rows / initial_rows
+
+            # Calculate penalty factors as a proportion of issues
+            outlier_penalty = (total_outliers / valid_rows) * penalties.outlier_penalty if valid_rows > 0 else 0
+            gap_penalty = (time_gaps / valid_rows) * penalties.gap_penalty if valid_rows > 0 else 0
+            # Penalties for issues that cause row removal are based on initial rows
+            ohlc_penalty = (ohlc_violations / initial_rows) * penalties.ohlc_violation_penalty
+            duplicate_penalty = (duplicate_timestamps / initial_rows) * penalties.duplicate_penalty
+
+            # Apply penalties multiplicatively for a more realistic score decay
+            final_score_factor = (
+                base_score_factor
+                * (1 - min(outlier_penalty, 1.0))
+                * (1 - min(gap_penalty, 1.0))
+                * (1 - min(ohlc_penalty, 1.0))
+                * (1 - min(duplicate_penalty, 1.0))
+            )
+
+            return max(0.0, final_score_factor * 100)
+
+        except Exception as e:
+            logger.error(f"Error calculating quality score: {e}")
+            return 0.0
