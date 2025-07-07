@@ -1,12 +1,10 @@
 import asyncio
 import logging
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-from src.core.labeler import BarrierConfig, OptimizedTripleBarrierLabeler, Label
+from src.core.labeler import BarrierConfig, OptimizedTripleBarrierLabeler
 from src.database.label_repo import LabelRepository
 from src.utils.config_loader import config_loader
 from src.utils.logger import LOGGER as logger

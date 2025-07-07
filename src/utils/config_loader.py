@@ -1,6 +1,7 @@
 from datetime import date, time
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
+import yaml
 from pydantic import BaseModel, Field, ValidationError, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -25,6 +26,8 @@ class BrokerConfig(BaseSettings):
     redirect_url: str
     websocket_mode: Literal["LTP", "QUOTE", "FULL"]
     historical_interval: Literal["minute", "3minute", "5minute", "10minute", "15minute", "30minute", "60minute", "day"]
+    token_file_path: str
+    should_fetch_instruments: bool = False
     connection_manager: ConnectionManagerConfig
 
 
@@ -46,6 +49,14 @@ class LabelingConfig(BaseModel):
     min_bars_required: int = Field(..., gt=0)
     epsilon: float = Field(..., gt=0)
     atr_smoothing: Literal["ema", "sma"]
+    use_dynamic_barriers: bool = True
+    volatility_lookback: int = Field(default=20, gt=0)
+    max_position_size: float = Field(default=1.0, gt=0)
+    min_price_change: float = Field(default=0.001, gt=0)
+    correlation_threshold: float = Field(default=0.7, ge=0, le=1)
+    min_return_threshold: float = Field(default=0.001, gt=0)
+    barrier_adjustment_factor: float = Field(default=1.0, gt=0)
+    label_threshold: float = Field(default=0.5, ge=0, le=1)
 
     @model_validator(mode="after")
     def check_atr_period_and_min_bars(self) -> "LabelingConfig":
@@ -56,11 +67,11 @@ class LabelingConfig(BaseModel):
 
 class FeatureConfig(BaseModel):
     enabled: bool = True
-    period: Optional[int] = Field(None, gt=0)
-    fast_period: Optional[int] = Field(None, gt=0)
-    slow_period: Optional[int] = Field(None, gt=0)
-    signal_period: Optional[int] = Field(None, gt=0)
-    std_dev: Optional[float] = Field(None, gt=0)
+    period: Optional[int] = Field(default=None, gt=0)
+    fast_period: Optional[int] = Field(default=None, gt=0)
+    slow_period: Optional[int] = Field(default=None, gt=0)
+    signal_period: Optional[int] = Field(default=None, gt=0)
+    std_dev: Optional[float] = Field(default=None, gt=0)
 
 
 class TradingFeaturesConfig(BaseModel):
@@ -73,6 +84,8 @@ class TradingFeaturesConfig(BaseModel):
     ema_slow: Optional[FeatureConfig] = None
     sma: Optional[FeatureConfig] = None
     volume_sma: Optional[FeatureConfig] = None
+    # Added missing attribute referenced by feature_calculator.py
+    configurations: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class TradingInstrumentConfig(BaseModel):
@@ -80,6 +93,7 @@ class TradingInstrumentConfig(BaseModel):
     tradingsymbol: str
     exchange: str
     instrument_type: str
+    segment: str
 
 
 class TradingConfig(BaseModel):
@@ -178,9 +192,24 @@ class SampleOutputConfig(BaseModel):
 
 
 class WalkForwardValidationConfig(BaseModel):
-    initial_train_size: int = Field(..., gt=0)
-    validation_size: int = Field(..., gt=0)
-    step_size: int = Field(..., gt=0)
+    initial_train_ratio: float = Field(..., gt=0, le=1)
+    validation_ratio: float = Field(..., gt=0, le=1)
+    step_ratio: float = Field(..., gt=0, le=1)
+
+
+class OptimizationConfig(BaseModel):
+    enabled: bool = True
+    n_trials: int = Field(default=50, gt=0)
+    n_splits: int = Field(default=5, gt=0)
+    test_size: int = Field(default=2000, gt=0)
+
+
+class FinalModelConfig(BaseModel):
+    num_boost_round: int = Field(default=1000, gt=0)
+
+
+class RetentionConfig(BaseModel):
+    max_model_versions: int = Field(default=5, gt=0)
 
 
 class ModelTrainingConfig(BaseModel):
@@ -189,6 +218,13 @@ class ModelTrainingConfig(BaseModel):
     historical_data_lookback_days: int = Field(..., gt=0)
     walk_forward_validation: WalkForwardValidationConfig
     lgbm_params: dict
+    optimization: OptimizationConfig = Field(default_factory=OptimizationConfig)
+    final_model: FinalModelConfig = Field(default_factory=FinalModelConfig)
+    retention: RetentionConfig = Field(default_factory=RetentionConfig)
+    # Added missing attributes referenced by predictor.py
+    confidence_threshold: float = Field(default=0.7, ge=0.0, le=1.0)
+    drift_threshold_z_score: float = Field(default=3.0, gt=0.0)
+    model_staleness_days: int = Field(default=7, gt=0)
 
 
 class ExampleConfig(BaseModel):
@@ -264,7 +300,7 @@ class SchedulerConfig(BaseModel):
 
 class HealthMonitorConfig(BaseModel):
     data_freshness_threshold_minutes: int = Field(..., gt=0)
-    monitor_interval: int = Field(..., gt=0)
+    monitor_interval: int = Field(default=300, gt=0)  # Default 5 minutes
 
 
 class CircuitBreakerConfig(BaseModel):
@@ -276,8 +312,8 @@ class CircuitBreakerConfig(BaseModel):
 class TimeSynchronizerConfig(BaseModel):
     candle_interval_minutes: int = Field(..., gt=0)
     latency_buffer_seconds: int = Field(..., ge=0)
-    max_sync_attempts: int = Field(3, gt=0)
-    sync_tolerance_seconds: float = Field(2.0, gt=0)
+    max_sync_attempts: int = Field(default=3, gt=0)
+    sync_tolerance_seconds: float = Field(default=2.0, gt=0)
 
 
 class CandleBufferConfig(BaseModel):
@@ -323,30 +359,99 @@ class ApiRateLimits(BaseModel):
     general_api: ApiRateLimit
 
 
-class AppConfig(BaseSettings):
-    model_config = SettingsConfigDict(yaml_file="config/config.yaml", yaml_file_encoding="utf-8")
+class AppConfig(BaseModel):
+    model_config = SettingsConfigDict(extra="ignore")
 
-    system: SystemConfig
-    broker: BrokerConfig
-    logging: LoggingConfig
-    trading: TradingConfig
-    performance: PerformanceConfig
-    api_rate_limits: ApiRateLimits
-    storage: StorageConfig
-    database: DatabaseConfig
-    example: ExampleConfig
-    statistics: StatisticsConfig
-    data_quality: DataQualityConfig
-    market_calendar: MarketCalendarConfig
-    scheduler: SchedulerConfig
-    time_synchronizer: TimeSynchronizerConfig
-    data_pipeline: DataPipelineConfig
-    health_monitor: HealthMonitorConfig
-    error_handler: CircuitBreakerConfig
-    model_training: ModelTrainingConfig
-    live_aggregator: LiveAggregatorConfig
-    signal_generation: SignalGenerationConfig
-    candle_buffer: CandleBufferConfig
+    system: Optional[SystemConfig] = None
+    broker: Optional[BrokerConfig] = None
+    logging: Optional[LoggingConfig] = None
+    trading: Optional[TradingConfig] = None
+    performance: Optional[PerformanceConfig] = None
+    data_quality: Optional[DataQualityConfig] = None
+    health_monitor: Optional[HealthMonitorConfig] = None
+    error_handler: Optional[CircuitBreakerConfig] = None
+    model_training: Optional[ModelTrainingConfig] = None
+    candle_buffer: Optional[CandleBufferConfig] = None
+    data_pipeline: Optional[DataPipelineConfig] = None
+
+    # Optional sections
+    api_rate_limits: Optional[ApiRateLimits] = None
+    storage: Optional[StorageConfig] = None
+    database: Optional[DatabaseConfig] = None
+    example: Optional[ExampleConfig] = None
+    statistics: Optional[StatisticsConfig] = None
+    market_calendar: Optional[MarketCalendarConfig] = None
+    scheduler: Optional[SchedulerConfig] = None
+    time_synchronizer: Optional[TimeSynchronizerConfig] = None
+    live_aggregator: Optional[LiveAggregatorConfig] = None
+    signal_generation: Optional[SignalGenerationConfig] = None
+
+    @model_validator(mode="after")
+    def validate_required_configs(self) -> "AppConfig":
+        required_fields = [
+            'system', 'broker', 'logging', 'trading', 'performance',
+            'data_quality', 'health_monitor', 'error_handler',
+            'model_training', 'candle_buffer', 'data_pipeline'
+        ]
+        missing = [field for field in required_fields if getattr(self, field) is None]
+        if missing:
+            raise ValueError(f"Required configuration sections missing: {missing}")
+        return self
+
+    def get_system_config(self) -> SystemConfig:
+        if self.system is None:
+            raise ValueError("System configuration not loaded")
+        return self.system
+
+    def get_broker_config(self) -> BrokerConfig:
+        if self.broker is None:
+            raise ValueError("Broker configuration not loaded")
+        return self.broker
+
+    def get_logging_config(self) -> LoggingConfig:
+        if self.logging is None:
+            raise ValueError("Logging configuration not loaded")
+        return self.logging
+
+    def get_trading_config(self) -> TradingConfig:
+        if self.trading is None:
+            raise ValueError("Trading configuration not loaded")
+        return self.trading
+
+    def get_performance_config(self) -> PerformanceConfig:
+        if self.performance is None:
+            raise ValueError("Performance configuration not loaded")
+        return self.performance
+
+    def get_data_quality_config(self) -> DataQualityConfig:
+        if self.data_quality is None:
+            raise ValueError("Data quality configuration not loaded")
+        return self.data_quality
+
+    def get_health_monitor_config(self) -> HealthMonitorConfig:
+        if self.health_monitor is None:
+            raise ValueError("Health monitor configuration not loaded")
+        return self.health_monitor
+
+    def get_error_handler_config(self) -> CircuitBreakerConfig:
+        if self.error_handler is None:
+            raise ValueError("Error handler configuration not loaded")
+        return self.error_handler
+
+    def get_model_training_config(self) -> ModelTrainingConfig:
+        if self.model_training is None:
+            raise ValueError("Model training configuration not loaded")
+        return self.model_training
+
+    def get_candle_buffer_config(self) -> CandleBufferConfig:
+        if self.candle_buffer is None:
+            raise ValueError("Candle buffer configuration not loaded")
+        return self.candle_buffer
+
+    def get_data_pipeline_config(self) -> DataPipelineConfig:
+        if self.data_pipeline is None:
+            raise ValueError("Data pipeline configuration not loaded")
+        return self.data_pipeline
 
 
 class ConfigLoader:
@@ -361,11 +466,17 @@ class ConfigLoader:
     def get_config(self) -> AppConfig:
         if self._config is None:
             try:
-                self._config = AppConfig()
+                with open("config/config.yaml", encoding="utf-8") as f:
+                    config_data = yaml.safe_load(f)
+                if config_data is None:
+                    raise ValueError("Config file is empty or invalid")
+                self._config = AppConfig(**config_data)
+            except FileNotFoundError:
+                raise FileNotFoundError("Configuration file 'config/config.yaml' not found.")
             except ValidationError as e:
                 raise ValueError(f"Configuration validation error: {e}") from e
             except Exception as e:
-                raise Exception(f"Error loading config file: {e}") from e
+                raise Exception(f"Error loading config file 'config/config.yaml': {e}") from e
         return self._config
 
 

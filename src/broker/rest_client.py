@@ -20,7 +20,7 @@ class KiteRESTClient:
     """
 
     def __init__(self) -> None:
-        self.api_key = config.broker.api_key
+        self.api_key = config.broker.api_key if config.broker and config.broker.api_key else ""
         self.token_manager = TokenManager()
         self.kite = self._initialize_kite_client()
         self.historical_data_rate_limiter = RateLimiter("historical_data")
@@ -56,7 +56,6 @@ class KiteRESTClient:
         to_date: str,
         interval: str,
         continuous: bool = False,
-        ohlc: bool = True,
     ) -> Optional[list[dict[str, Any]]]:
         """
         Fetches historical OHLCV data for a given instrument.
@@ -68,7 +67,6 @@ class KiteRESTClient:
             to_date (str): End date (yyyy-mm-dd).
             interval (str): Candle interval (e.g., "minute", "5minute", "15minute", "day").
             continuous (bool, optional): Whether to fetch continuous data for futures. Defaults to False.
-            ohlc (bool, optional): Whether to return only OHLC data. Defaults to True.
 
         Returns:
             Optional[list[Dict[str, Any]]]: List of historical data candles, or None if an error occurs.
@@ -88,7 +86,6 @@ class KiteRESTClient:
                         to_date,
                         interval,
                         continuous=continuous,
-                        ohlc=ohlc,
                     ),
                 )
         except TokenException as e:

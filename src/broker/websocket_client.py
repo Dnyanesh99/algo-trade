@@ -24,7 +24,7 @@ class KiteWebSocketClient:
         on_reconnect_callback: Callable[[int], Any],
         on_noreconnect_callback: Callable[[], Any],
     ):
-        self.api_key = config.broker.api_key
+        self.api_key = config.broker.api_key if config.broker and config.broker.api_key else ""
         self.token_manager = TokenManager()
         self.kws: Optional[KiteTicker] = None
         self.on_ticks_callback = on_ticks_callback
@@ -144,12 +144,7 @@ class KiteWebSocketClient:
                 "QUOTE": self.kws.MODE_QUOTE,
                 "LTP": self.kws.MODE_LTP,
             }
-            selected_mode = mode_map.get(config.broker.websocket_mode.upper())
-            if selected_mode is None:
-                logger.warning(
-                    f"Invalid WebSocket mode configured: {config.broker.websocket_mode}. Defaulting to FULL."
-                )
-                selected_mode = self.kws.MODE_FULL
+            selected_mode = mode_map.get(config.broker.websocket_mode.upper() if config.broker and config.broker.websocket_mode else "FULL")
             self.kws.set_mode(selected_mode, instrument_tokens)
         else:
             logger.warning("Cannot subscribe: Kite WebSocket not connected.")

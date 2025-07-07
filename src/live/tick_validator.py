@@ -13,7 +13,7 @@ class TickValidator:
     """
 
     def __init__(self) -> None:
-        self.lpt_threshold = config.data_quality.live_data_lpt_threshold
+        self.lpt_threshold = config.get_data_quality_config().live_data_lpt_threshold
         self._last_sequence_numbers: dict[int, int] = {}
         logger.info(f"TickValidator initialized with LPT threshold: {self.lpt_threshold}")
 

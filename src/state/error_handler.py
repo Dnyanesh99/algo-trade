@@ -24,6 +24,7 @@ class CircuitBreaker:
         on_trip: Optional[Callable[[str], Awaitable[Any]]] = None,
         on_reset: Optional[Callable[[str], Awaitable[Any]]] = None,
     ):
+        assert config.error_handler is not None
         self.name = name
         self.failure_threshold = config.error_handler.failure_threshold
         self.recovery_timeout = config.error_handler.recovery_timeout
@@ -43,7 +44,7 @@ class CircuitBreaker:
     def state(self) -> str:
         return self._state
 
-    async def _check_and_transition(self):
+    async def _check_and_transition(self) -> None:
         """
         Internal method to check state transitions based on failures and time.
         """
@@ -123,7 +124,7 @@ class ErrorHandler:
     and alert escalation.
     """
 
-    def __init__(self, system_state: SystemState):
+    def __init__(self, system_state: SystemState) -> None:
         self.system_state = system_state
         self.circuit_breakers: dict[str, CircuitBreaker] = defaultdict(self._create_default_breaker)
         self.breaker_config = config.error_handler
@@ -134,14 +135,11 @@ class ErrorHandler:
         """
         return CircuitBreaker(
             name="default",  # Name will be overridden when added to dict
-            failure_threshold=self.breaker_config.failure_threshold,
-            recovery_timeout=self.breaker_config.recovery_timeout,
-            half_open_attempts=self.breaker_config.half_open_attempts,
             on_trip=self._on_breaker_trip,
             on_reset=self._on_breaker_reset,
         )
 
-    async def _on_breaker_trip(self, breaker_name: str):
+    async def _on_breaker_trip(self, breaker_name: str) -> None:
         """
         Callback when a circuit breaker trips to OPEN state.
         Escalates alert and updates system state.
@@ -150,7 +148,7 @@ class ErrorHandler:
         self.system_state.set_system_status(f"ERROR: {breaker_name}_BREAKER_TRIPPED")
         # TODO: Implement actual alert escalation (e.g., email, PagerDuty)
 
-    async def _on_breaker_reset(self, breaker_name: str):
+    async def _on_breaker_reset(self, breaker_name: str) -> None:
         """
         Callback when a circuit breaker resets to CLOSED state.
         """
@@ -173,11 +171,12 @@ class ErrorHandler:
         Retrieves or creates a circuit breaker for a given component.
         """
         if component_name not in self.circuit_breakers:
-            breaker = self._create_default_breaker(component_name)
+            breaker = self._create_default_breaker()
+            breaker.name = component_name
             self.circuit_breakers[component_name] = breaker
         return self.circuit_breakers[component_name]
 
-    async def execute_safely(self, component_name: str, operation: Callable[..., Any], *args, **kwargs) -> Any:
+    async def execute_safely(self, component_name: str, operation: Callable[..., Awaitable[Any]], *args: Any, **kwargs: Any) -> Any:
         """
         Executes an operation safely using the circuit breaker pattern.
         """

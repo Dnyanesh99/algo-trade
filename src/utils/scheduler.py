@@ -5,7 +5,7 @@ Handles market hours, readiness checks, and precise timing for predictions.
 
 import asyncio
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 from typing import Any, Callable, Optional
 
 from src.state.system_state import SystemState
@@ -39,8 +39,13 @@ class Scheduler:
         self.prediction_pipeline_callback = prediction_pipeline_callback
 
         # Configuration-driven parameters
-        self.candle_interval_minutes = config.scheduler.prediction_interval_minutes
-        self.readiness_check_time = datetime.strptime(config.scheduler.readiness_check_time, "%H:%M").time()
+        if config.scheduler:
+            self.candle_interval_minutes = config.scheduler.prediction_interval_minutes
+            self.readiness_check_time = datetime.strptime(config.scheduler.readiness_check_time, "%H:%M").time()
+        else:
+            logger.warning("Scheduler configuration not found. Using default values.")
+            self.candle_interval_minutes = 15  # Default
+            self.readiness_check_time = time(9, 30) # Default
 
         # State management
         self._scheduler_task: Optional[asyncio.Task] = None

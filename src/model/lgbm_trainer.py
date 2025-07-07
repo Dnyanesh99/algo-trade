@@ -26,11 +26,13 @@ from src.database.feature_repo import FeatureRepository
 from src.database.label_repo import LabelRepository
 from src.state.error_handler import ErrorHandler
 from src.state.health_monitor import HealthMonitor
-from src.utils.config_loader import config
-from src.utils.logger import LoggerSetup
+from src.utils.config_loader import ModelTrainingConfig, config_loader
+from src.utils.logger import LOGGER as logger
 from src.utils.performance_metrics import PerformanceMetrics
+import pytz
 
-logger = LoggerSetup.get_logger()
+config = config_loader.get_config()
+app_timezone = pytz.timezone(config.system.timezone)
 
 
 class LGBMTrainer:
@@ -60,8 +62,9 @@ class LGBMTrainer:
         self.feature_calculator = feature_calculator
 
         # Load configuration
-        self.model_config = config.model
-        self.artifacts_path = Path(config.paths.artifact_dir)
+        assert config.model_training is not None
+        self.model_config: ModelTrainingConfig = config.model_training
+        self.artifacts_path = Path(self.model_config.artifacts_path)
         self.artifacts_path.mkdir(parents=True, exist_ok=True)
 
         # Initialize scaler for feature normalization
@@ -88,7 +91,7 @@ class LGBMTrainer:
 
             # 1. Fetch and prepare data
             train_df = await self._fetch_training_data(instrument_id, timeframe)
-            min_data_for_training = self.model_config.walk_forward_splits * 50  # A reasonable minimum
+            min_data_for_training = self.model_config.min_data_for_training
             if train_df.empty or len(train_df) < min_data_for_training:
                 logger.warning(
                     f"Insufficient data for {instrument_id} ({timeframe}): {len(train_df)} < {min_data_for_training}"
@@ -137,7 +140,7 @@ class LGBMTrainer:
             )
 
             self.performance_metrics.stop_timer("model_training", timer_id, True)
-            await self.health_monitor.record_successful_operation("model_training")
+            self.health_monitor.record_successful_operation("model_training")
 
             return model_path
 
@@ -154,22 +157,22 @@ class LGBMTrainer:
         """
         Fetches features and labels with proper time alignment.
         """
-        # A more realistic lookback for training
-        end_time = datetime.now()
-        start_time = end_time - pd.DateOffset(years=2)
+        # Use configured lookback for training
+        end_time = app_timezone.localize(datetime.now()) if datetime.now().tzinfo is None else datetime.now()
+        start_time = end_time - pd.DateOffset(days=self.model_config.historical_data_lookback_days)
 
         features_records = await self.feature_repo.get_features_by_instrument(
-            instrument_id=instrument_id, start_date=start_time, end_date=end_time
+            instrument_id=instrument_id, timeframe=timeframe, start_time=start_time, end_time=end_time
         )
         labels_records = await self.label_repo.get_labels_by_instrument(
-            instrument_id=instrument_id, start_date=start_time, end_date=end_time
+            instrument_id=instrument_id, timeframe=timeframe, start_time=start_time, end_time=end_time
         )
 
         if not features_records or not labels_records:
             return pd.DataFrame()
 
-        features_df = pd.DataFrame(features_records)
-        labels_df = pd.DataFrame(labels_records)
+        features_df = pd.DataFrame([f.model_dump() for f in features_records])
+        labels_df = pd.DataFrame([l.model_dump() for l in labels_records])
 
         # Pivot features to wide format
         features_pivot = features_df.pivot_table(
@@ -211,7 +214,8 @@ class LGBMTrainer:
         """
         Returns default LightGBM parameters from config.
         """
-        params = self.model_config.params.copy()
+        assert self.model_config is not None
+        params = self.model_config.lgbm_params.copy()
         params.update(
             {
                 "objective": "multiclass",
@@ -231,10 +235,11 @@ class LGBMTrainer:
         """
         Performs walk-forward validation.
         """
-        tscv = TimeSeriesSplit(n_splits=self.model_config.walk_forward_splits)
+        assert self.model_config is not None
+        tscv = TimeSeriesSplit(n_splits=self.model_config.optimization.n_splits)
         all_predictions = []
         all_actuals = []
-        all_probabilities = []
+        all_probabilities: list[np.ndarray] = []
         feature_importance_sum = np.zeros(len(X.columns))
         n_windows = 0
         model = None
@@ -256,16 +261,19 @@ class LGBMTrainer:
             train_data = lgb.Dataset(X_train_scaled, label=y_train + 1, weight=sample_weights)
             val_data = lgb.Dataset(X_val_scaled, label=y_val + 1, reference=train_data)
 
-            model = await loop.run_in_executor(
-                None,
-                lgb.train,
-                params,
-                train_data,
-                1000,
-                [val_data],
-                [lgb.early_stopping(50, verbose=False)],
-            )
+            # Create a wrapper function to resolve LightGBM signature conflicts with mypy
+            def _train_lgb_model() -> lgb.Booster:
+                return lgb.train(
+                    params,
+                    train_data,
+                    1000,
+                    valid_sets=[val_data],
+                    callbacks=[lgb.early_stopping(50, verbose=False)],
+                )
 
+            model = await loop.run_in_executor(None, _train_lgb_model)
+
+            assert model is not None
             y_pred_proba = model.predict(X_val_scaled, num_iteration=model.best_iteration)
             y_pred = np.argmax(y_pred_proba, axis=1) - 1
 
@@ -313,14 +321,14 @@ class LGBMTrainer:
         train_data = lgb.Dataset(X_scaled, label=y + 1, weight=sample_weights)
 
         final_params = params.copy()
-        num_boost_round = final_params.pop("num_boost_round", 1000)
+        num_boost_round = self.model_config.final_model.num_boost_round
 
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, lgb.train, final_params, train_data, num_boost_round)
 
     def _log_training_metrics(
         self, metrics: dict[str, Any], feature_importance: dict[str, float], instrument_id: int, timeframe: str
-    ):
+    ) -> None:
         logger.info(f"\n{'=' * 60}")
         logger.info(f"Training Results for {instrument_id} ({timeframe})")
         logger.info(f"{'=' * 60}")
@@ -379,11 +387,12 @@ class LGBMTrainer:
         logger.info(f"Model artifacts saved to {version_dir}")
         return model_path
 
-    async def _cleanup_old_models(self, instrument_id: int, timeframe: str):
+    async def _cleanup_old_models(self, instrument_id: int, timeframe: str) -> None:
         """
         Removes old model versions keeping only the most recent N.
         """
-        max_versions = 5  # Keep last 5 versions
+        assert self.model_config is not None
+        max_versions = self.model_config.retention.max_model_versions
         pattern = f"lgbm_{instrument_id}_{timeframe}_*"
         model_dirs = sorted(
             [d for d in self.artifacts_path.glob(pattern) if d.is_dir()], key=lambda x: x.stat().st_mtime, reverse=True

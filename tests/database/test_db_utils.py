@@ -32,10 +32,11 @@ async def test_db_manager_singleton(setup_db_manager):
 async def test_db_manager_initialize_close(setup_db_manager):
     logger.info("\n--- Starting test_db_manager_initialize_close ---")
     manager = setup_db_manager
-    
-    with patch('src.database.db_utils.asyncpg.create_pool', new=AsyncMock()) as mock_create_pool,
-         patch('src.database.db_utils.logger.info') as mock_logger_info:
-        
+
+    with (
+        patch('src.database.db_utils.asyncpg.create_pool', new=AsyncMock()) as mock_create_pool,
+        patch('src.database.db_utils.logger.info') as mock_logger_info,
+    ):
         mock_pool = AsyncMock()
         mock_create_pool.return_value = mock_pool
 
@@ -54,7 +55,7 @@ async def test_db_manager_initialize_close(setup_db_manager):
 async def test_db_manager_transaction(setup_db_manager):
     logger.info("\n--- Starting test_db_manager_transaction ---")
     manager = setup_db_manager
-    
+
     mock_conn = AsyncMock()
     mock_conn.transaction.return_value = AsyncMock()
     manager.get_connection = AsyncMock(return_value=asyncio.AsyncContextManager(mock_conn))
@@ -73,7 +74,7 @@ async def test_db_manager_transaction(setup_db_manager):
 async def test_db_manager_transaction_rollback(setup_db_manager):
     logger.info("\n--- Starting test_db_manager_transaction_rollback ---")
     manager = setup_db_manager
-    
+
     mock_conn = AsyncMock()
     mock_conn.transaction.return_value = AsyncMock()
     manager.get_connection = AsyncMock(return_value=asyncio.AsyncContextManager(mock_conn))
@@ -91,9 +92,10 @@ async def test_db_manager_transaction_rollback(setup_db_manager):
 async def test_db_manager_fetch_rows(setup_db_manager):
     logger.info("\n--- Starting test_db_manager_fetch_rows ---")
     manager = setup_db_manager
-    
+
     mock_conn = AsyncMock()
     mock_conn.fetch.return_value = [MagicMock(id=1, name="test1"), MagicMock(id=2, name="test2")]
+
     manager.get_connection = AsyncMock(return_value=asyncio.AsyncContextManager(mock_conn))
 
     rows = await manager.fetch_rows("SELECT * FROM test_data")

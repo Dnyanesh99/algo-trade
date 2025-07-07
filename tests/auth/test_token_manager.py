@@ -1,8 +1,10 @@
 import asyncio
+
 import pytest
 
 from src.auth.token_manager import TokenManager
 from src.utils.logger import LOGGER as logger
+
 
 @pytest.mark.asyncio
 async def test_token_manager_functionality():

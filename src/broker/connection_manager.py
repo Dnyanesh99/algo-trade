@@ -25,7 +25,11 @@ class ConnectionManager:
         self.on_data_gap_detected = on_data_gap_detected
         self.on_noreconnect_critical = on_noreconnect_critical
         self._monitor_task: Optional[asyncio.Task] = None
-        self._monitor_interval = config.broker.connection_manager.monitor_interval
+        if config.broker and config.broker.connection_manager:
+            self._monitor_interval = config.broker.connection_manager.monitor_interval
+        else:
+            logger.warning("Broker connection manager configuration not found. Using default monitor interval (5 seconds).")
+            self._monitor_interval = 5  # Default value
 
         # Assign KiteTicker callbacks to be handled by ConnectionManager
         self.websocket_client.on_reconnect_callback = self._on_reconnect_from_kws

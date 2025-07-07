@@ -78,7 +78,7 @@ class OHLCVRepository:
             logger.debug(
                 f"Fetched {len(rows)} OHLCV records for {instrument_id} ({timeframe}) from {start_time} to {end_time}."
             )
-            return [OHLCVData.model_validate(row) for row in rows]
+            return [OHLCVData.model_validate(dict(row)) for row in rows]
         except Exception as e:
             logger.error(f"Error fetching OHLCV data for {instrument_id} ({timeframe}): {e}")
             raise
@@ -93,7 +93,7 @@ class OHLCVRepository:
             row = await self.db_manager.fetch_row(query, instrument_id)
             if row:
                 logger.debug(f"Fetched latest {timeframe} candle for {instrument_id}: {row['ts']}")
-                return OHLCVData.model_validate(row)
+                return OHLCVData.model_validate(dict(row))
             logger.debug(f"No latest {timeframe} candle found for {instrument_id}.")
             return None
         except Exception as e:
@@ -110,7 +110,7 @@ class OHLCVRepository:
         try:
             rows = await self.db_manager.fetch_rows(query, instrument_id, limit)
             logger.debug(f"Fetched {len(rows)} recent {timeframe} candles for {instrument_id} for feature calculation.")
-            return [OHLCVData.model_validate(row) for row in rows]
+            return [OHLCVData.model_validate(dict(row)) for row in rows]
         except Exception as e:
             logger.error(f"Error fetching OHLCV data for features for {instrument_id} ({timeframe}): {e}")
             raise

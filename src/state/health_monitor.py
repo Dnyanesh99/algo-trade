@@ -1,6 +1,6 @@
 import asyncio
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Any, Optional
 
 import pytz
 
@@ -22,9 +22,10 @@ class HealthMonitor:
     def __init__(
         self,
         system_state: SystemState,
-        ws_client: KiteWebSocketClient,
+        ws_client: Optional[KiteWebSocketClient],
         db_manager: DatabaseManager,
     ):
+        assert config.health_monitor is not None
         self.system_state = system_state
         self.ws_client = ws_client
         self.db_manager = db_manager
@@ -44,6 +45,11 @@ class HealthMonitor:
         """
         Checks the health of the WebSocket connection.
         """
+        if self.ws_client is None:
+            health_info = {"status": "not_available"}
+            self.system_state.update_component_health("WebSocket", health_info)
+            return
+
         is_connected = self.ws_client.is_connected()
         health_info = {"status": "connected" if is_connected else "disconnected"}
         self.system_state.update_component_health("WebSocket", health_info)
@@ -69,6 +75,7 @@ class HealthMonitor:
         """
         Checks the freshness of the last received data for all tracked instruments.
         """
+        assert config.system is not None
         current_time = datetime.now(pytz.timezone(config.system.timezone))
 
         for instrument_token, last_ts in self._last_data_timestamp.items():
@@ -117,3 +124,14 @@ class HealthMonitor:
                 logger.error(f"Error stopping health monitor: {e}")
             finally:
                 self._monitor_task = None
+
+    def record_successful_operation(self, operation_name: str, **kwargs: Any) -> None:
+        """
+        Records a successful operation for monitoring purposes.
+        """
+        logger.debug(f"Successful operation recorded: {operation_name}")
+        # Update system state with successful operation
+        self.system_state.update_component_health(
+            operation_name,
+            {"status": "success", "timestamp": datetime.now(), **kwargs}
+        )

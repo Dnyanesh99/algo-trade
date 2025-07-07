@@ -1,15 +1,16 @@
 import asyncio
 import threading
 from concurrent.futures import ProcessPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from enum import IntEnum
-from typing import Any, Optional
+from typing import Any, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 import psutil
 from numba import jit, prange
+from numpy.typing import NDArray
 
 from src.database.label_repo import LabelRepository
 from src.database.models import LabelData
@@ -36,15 +37,40 @@ class Label(IntEnum):
 
 @dataclass(frozen=True)
 class BarrierConfig:
-    atr_period: int = field(default_factory=lambda: config.trading.labeling.atr_period)
-    tp_atr_multiplier: float = field(default_factory=lambda: config.trading.labeling.tp_atr_multiplier)
-    sl_atr_multiplier: float = field(default_factory=lambda: config.trading.labeling.sl_atr_multiplier)
-    max_holding_periods: int = field(default_factory=lambda: config.trading.labeling.max_holding_periods)
-    min_bars_required: int = field(default_factory=lambda: config.trading.labeling.min_bars_required)
-    atr_smoothing: str = field(default_factory=lambda: config.trading.labeling.atr_smoothing)
-    epsilon: float = field(default_factory=lambda: config.trading.labeling.epsilon)
-    use_dynamic_barriers: bool = field(default_factory=lambda: config.trading.labeling.use_dynamic_barriers)
-    volatility_lookback: int = field(default_factory=lambda: config.trading.labeling.volatility_lookback)
+    atr_period: int
+    tp_atr_multiplier: float
+    sl_atr_multiplier: float
+    max_holding_periods: int
+    min_bars_required: int
+    atr_smoothing: str
+    epsilon: float
+    use_dynamic_barriers: bool
+    volatility_lookback: int
+
+    def __post_init__(self) -> None:
+        assert config.trading is not None and config.trading.labeling is not None
+        # This is a bit of a hack to work around the dataclass being frozen
+        object.__setattr__(self, "atr_period", self.atr_period or config.trading.labeling.atr_period)
+        object.__setattr__(
+            self, "tp_atr_multiplier", self.tp_atr_multiplier or config.trading.labeling.tp_atr_multiplier
+        )
+        object.__setattr__(
+            self, "sl_atr_multiplier", self.sl_atr_multiplier or config.trading.labeling.sl_atr_multiplier
+        )
+        object.__setattr__(
+            self, "max_holding_periods", self.max_holding_periods or config.trading.labeling.max_holding_periods
+        )
+        object.__setattr__(
+            self, "min_bars_required", self.min_bars_required or config.trading.labeling.min_bars_required
+        )
+        object.__setattr__(self, "atr_smoothing", self.atr_smoothing or config.trading.labeling.atr_smoothing)
+        object.__setattr__(self, "epsilon", self.epsilon or config.trading.labeling.epsilon)
+        object.__setattr__(
+            self, "use_dynamic_barriers", self.use_dynamic_barriers or config.trading.labeling.use_dynamic_barriers
+        )
+        object.__setattr__(
+            self, "volatility_lookback", self.volatility_lookback or config.trading.labeling.volatility_lookback
+        )
 
 
 @dataclass
@@ -95,12 +121,12 @@ class OptimizedTripleBarrierLabeler:
         )
 
     @staticmethod
-    @jit(nopython=True, cache=True, fastmath=True)
-    def _calculate_true_range(high: np.ndarray, low: np.ndarray, close: np.ndarray) -> np.ndarray:
+    @jit(nopython=True, cache=True, fastmath=True)  # type: ignore[misc]
+    def _calculate_true_range(high: NDArray[np.float64], low: NDArray[np.float64], close: NDArray[np.float64]) -> NDArray[np.float64]:
         """Calculate True Range with proper handling of the first bar."""
         n = len(high)
         if n == 0:
-            return np.array([], dtype=np.float64)
+            return np.zeros(0, dtype=np.float64)
 
         tr = np.empty(n, dtype=np.float64)
         tr[0] = high[0] - low[0]
@@ -113,7 +139,7 @@ class OptimizedTripleBarrierLabeler:
 
         return tr
 
-    def _calculate_atr(self, df: pd.DataFrame, symbol: str) -> np.ndarray:
+    def _calculate_atr(self, df: pd.DataFrame, symbol: str) -> NDArray[np.float64]:
         """Calculate ATR with a symbol-specific cache for performance."""
         # --- SUGGESTION IMPLEMENTED: More specific cache key ---
         cache_key = f"{symbol}_{df.index[0]}_{df.index[-1]}_{len(df)}"
@@ -159,18 +185,18 @@ class OptimizedTripleBarrierLabeler:
         return tp_multiplier.values, sl_multiplier.values
 
     @staticmethod
-    @jit(nopython=True, parallel=True, cache=True, fastmath=True)
+    @jit(nopython=True, parallel=True, cache=True, fastmath=True)  # type: ignore[misc]
     def _check_barriers_optimized(
-        high: np.ndarray,
-        low: np.ndarray,
-        open_: np.ndarray,
-        close: np.ndarray,
-        entry_prices: np.ndarray,
-        tp_prices: np.ndarray,
-        sl_prices: np.ndarray,
+        high: NDArray[np.float64],
+        low: NDArray[np.float64],
+        open_: NDArray[np.float64],
+        close: NDArray[np.float64],
+        entry_prices: NDArray[np.float64],
+        tp_prices: NDArray[np.float64],
+        sl_prices: NDArray[np.float64],
         max_periods: int,
         epsilon: float,
-    ) -> tuple:
+    ) -> Tuple[NDArray[np.int8], NDArray[np.int32], NDArray[np.float64], NDArray[np.int8], NDArray[np.float64], NDArray[np.float64]]:
         """Optimized barrier checking with parallel processing."""
         n = len(entry_prices)
         labels = np.zeros(n, dtype=np.int8)
@@ -233,6 +259,7 @@ class OptimizedTripleBarrierLabeler:
         results: tuple,
         tp_multipliers: np.ndarray,
         sl_multipliers: np.ndarray,
+        timeframe: str,
     ) -> pd.DataFrame:
         """Prepare labels DataFrame with all required fields."""
         labels, exit_offsets, exit_prices, exit_reasons, mfe, mae = results
@@ -243,9 +270,29 @@ class OptimizedTripleBarrierLabeler:
         potential_loss = df["close"].values - sl_prices
         risk_reward_ratio = potential_profit / (potential_loss + 1e-10)
 
+        # Ensure we have a timestamp column
+        timestamp_col = None
+        if "timestamp" in df.columns:
+            timestamp_col = df["timestamp"]
+        elif "ts" in df.columns:
+            timestamp_col = df["ts"]
+        elif df.index.name == "timestamp" or isinstance(df.index, pd.DatetimeIndex):
+            timestamp_col = df.index
+        else:
+            # If no timestamp column found, use the index
+            timestamp_col = df.index
+        
+        # Ensure timestamp_col is a pandas Series or Index with proper length
+        if not isinstance(timestamp_col, (pd.Series, pd.Index)):
+            timestamp_col = pd.Series(timestamp_col, index=df.index)
+        elif len(timestamp_col) != len(df):
+            # If lengths don't match, use the index
+            timestamp_col = df.index
+        
         result_df = pd.DataFrame(
             {
-                "timestamp": df["timestamp"],
+                "ts": timestamp_col,
+                "timeframe": timeframe,
                 "instrument_id": instrument_id,
                 "label": labels,
                 "exit_reason": [ExitReason(r).name for r in exit_reasons],
@@ -311,7 +358,7 @@ class OptimizedTripleBarrierLabeler:
             )
 
             labeled_df = self._prepare_labels_dataframe(
-                instrument_id, df_sorted, results, tp_multipliers, sl_multipliers
+                instrument_id, df_sorted, results, tp_multipliers, sl_multipliers, timeframe
             )
             if labeled_df.empty:
                 logger.warning(f"No valid labels generated for {symbol}")
@@ -321,7 +368,7 @@ class OptimizedTripleBarrierLabeler:
 
             if not labeled_df.empty:
                 labels_to_insert = [LabelData(**row) for row in labeled_df.to_dict("records")]
-                await self.label_repo.insert_labels(instrument_id, timeframe, labels_to_insert)
+                await self.label_repo.insert_labels(instrument_id, labels_to_insert)
                 logger.info(f"Stored {len(labels_to_insert)} labels for {symbol} in {stats.processing_time_ms:.2f}ms")
 
             with self.stats_lock:
@@ -386,17 +433,21 @@ class OptimizedTripleBarrierLabeler:
         ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        stats_dict = {}
+        stats_dict: dict[str, LabelingStats] = {}
         for i, (_inst_id, info) in enumerate(symbol_data.items()):
-            if isinstance(results[i], LabelingStats):
-                stats_dict[info["symbol"]] = results[i]
-            elif isinstance(results[i], Exception):
-                logger.error(f"Failed to process {info['symbol']}: {results[i]}")
+            result_item = results[i]
+            if isinstance(result_item, LabelingStats):
+                stats_dict[info["symbol"]] = result_item
+            elif result_item is None:
+                logger.warning(f"No labels generated for {info['symbol']}")
+            elif isinstance(result_item, Exception):
+                logger.error(f"Failed to process {info['symbol']}: {result_item}")
 
         logger.info(f"Parallel labeling completed: {len(stats_dict)}/{len(symbol_data)} symbols processed successfully")
         return stats_dict
 
-    async def shutdown(self):
+    async def shutdown(self) -> None:
         """--- SUGGESTION IMPLEMENTED: Gracefully shuts down the process pool executor. ---"""
         logger.info("Shutting down the ProcessPoolExecutor.")
         self.executor.shutdown(wait=True)
+

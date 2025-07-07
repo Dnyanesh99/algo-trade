@@ -1,15 +1,11 @@
 import asyncio
-from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from kiteconnect import KiteConnect
 
-from src.auth.token_manager import TokenManager
 from src.broker.rest_client import KiteRESTClient
 from src.utils.config_loader import config_loader
 from src.utils.logger import LOGGER as logger
-from src.utils.rate_limiter import RateLimiter
 
 # Load configuration for tests
 config = config_loader.get_config()

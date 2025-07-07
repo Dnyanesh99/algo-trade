@@ -51,7 +51,7 @@ class PerformanceMetrics:
         Starts a timer for a given operation.
         Returns the current time (monotonic) to be used as a start marker.
         """
-        if not config.performance.metrics.enabled:
+        if not config.performance or not config.performance.metrics or not config.performance.metrics.enabled:
             return 0.0
         start_time = time.monotonic()
         logger.debug(f"Timer started for '{operation_name}'.")
@@ -66,7 +66,7 @@ class PerformanceMetrics:
             start_time (float): The start time returned by start_timer.
             success (bool): True if the operation was successful, False otherwise.
         """
-        if not config.performance.metrics.enabled:
+        if not config.performance or not config.performance.metrics or not config.performance.metrics.enabled:
             return
         end_time = time.monotonic()
         duration = end_time - start_time
@@ -96,7 +96,7 @@ class PerformanceMetrics:
         Returns:
             Dict[str, Any]: A dictionary containing the metrics.
         """
-        if not config.performance.metrics.enabled:
+        if not config.performance or not config.performance.metrics or not config.performance.metrics.enabled:
             return {}
 
         with self._lock:
@@ -146,7 +146,7 @@ class PerformanceMetrics:
         """
         Resets metrics for a specific operation or all operations.
         """
-        if not config.performance.metrics.enabled:
+        if not config.performance or not config.performance.metrics or not config.performance.metrics.enabled:
             return
 
         with self._lock:

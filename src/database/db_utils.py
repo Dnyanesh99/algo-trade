@@ -38,6 +38,9 @@ class DatabaseManager:
             if self._pool is None:
                 logger.info("Initializing database connection pool...")
                 db_config = config.database
+                if db_config is None:
+                    logger.critical("Database configuration is missing.")
+                    raise ValueError("Database configuration is missing.")
                 try:
                     self._pool = await asyncpg.create_pool(
                         user=db_config.user,
@@ -112,7 +115,8 @@ class DatabaseManager:
         Executes a query and fetches all matching rows.
         """
         async with self.get_connection() as conn:
-            return await conn.fetch(query, *args)
+            result = await conn.fetch(query, *args)
+            return result  # type: ignore[no-any-return]
 
     async def fetch_row(self, query: str, *args: Any) -> Optional[asyncpg.Record]:
         """
@@ -127,7 +131,8 @@ class DatabaseManager:
         Returns the command status.
         """
         async with self.get_connection() as conn:
-            return await conn.execute(query, *args)
+            result = await conn.execute(query, *args)
+            return result  # type: ignore[no-any-return]
 
 
 db_manager = DatabaseManager()

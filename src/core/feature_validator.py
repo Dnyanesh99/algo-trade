@@ -12,6 +12,7 @@ class FeatureValidator:
     """Validates calculated features for correctness and quality."""
 
     def __init__(self) -> None:
+        assert config.data_quality is not None
         self.validation_config = config.data_quality.validation
         self.outlier_config = config.data_quality.outlier_detection
         logger.info("FeatureValidator initialized.")

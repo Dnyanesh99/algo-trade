@@ -16,11 +16,11 @@ from src.utils.logger import LOGGER as logger
 class DatabaseMigrator:
     """Handles database schema migrations for the trading system."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.db_manager = db_manager
         self.migrations_dir = Path(__file__).parent / "migrations"
 
-    async def initialize_migration_tracking(self):
+    async def initialize_migration_tracking(self) -> None:
         """Create migration tracking table if it doesn't exist."""
         create_migrations_table = """
             CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -87,7 +87,7 @@ class DatabaseMigrator:
             logger.error(f"❌ Migration {version} failed: {e}")
             return False
 
-    async def run_all_migrations(self):
+    async def run_all_migrations(self) -> None:
         """Run all pending migrations in order."""
         logger.info("🚀 Starting database migration process")
 
@@ -135,7 +135,7 @@ class DatabaseMigrator:
 
         logger.info("🏁 Migration process completed")
 
-    async def get_migration_status(self):
+    async def get_migration_status(self) -> None:
         """Get current migration status."""
         applied_migrations = await self.get_applied_migrations()
 

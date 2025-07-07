@@ -1,6 +1,7 @@
 from datetime import datetime
 from typing import Any, Callable, Optional
 
+from src.database.models import SignalData
 from src.database.signal_repo import SignalRepository
 from src.state.error_handler import ErrorHandler
 from src.state.health_monitor import HealthMonitor
@@ -27,6 +28,7 @@ class SignalGenerator:
         performance_metrics: PerformanceMetrics,
         on_signal_generated: Callable[[dict[str, Any]], Any],
     ):
+        assert config.signal_generation is not None
         self.signal_repo = signal_repo
         self.position_tracker = position_tracker
         self.error_handler = error_handler
@@ -82,29 +84,28 @@ class SignalGenerator:
                 signal_type = "Hold"
                 direction = "Neutral"
 
-            signal_data = {
-                "timestamp": timestamp,
-                "instrument_id": instrument_id,
-                "signal_type": signal_type,
-                "direction": direction,
-                "confidence_score": confidence_score,
-                "source_feature_name": source_feature_name,
-                "price_at_signal": current_price,
-                "source_feature_value": source_feature_value,
-                "details": {"timeframe": timeframe, "prediction": prediction},
-            }
-
             if signal_type != "Hold":
-                await self.signal_repo.insert_signal(instrument_id, signal_data)
+                signal_data_model = SignalData(
+                    ts=timestamp,
+                    signal_type=signal_type,
+                    direction=direction,
+                    confidence_score=confidence_score,
+                    source_feature_name=source_feature_name,
+                    price_at_signal=current_price,
+                    source_feature_value=source_feature_value,
+                    details={"timeframe": timeframe, "prediction": prediction},
+                )
+                await self.signal_repo.insert_signal(instrument_id, signal_data_model)
                 logger.info(
                     f"Generated signal: {direction} for {instrument_id} at {current_price} (Confidence: {confidence_score:.2f})"
                 )
 
                 # Dispatch signal to alert system
-                await self.on_signal_generated(signal_data)
+                signal_data_dict = signal_data_model.model_dump()
+                await self.on_signal_generated(signal_data_dict)
 
                 self.performance_metrics.stop_timer("signal_generator", start_time, True)
-                return signal_data
+                return signal_data_dict
             logger.info(
                 f"No actionable signal generated for {instrument_id} (Hold). Confidence: {confidence_score:.2f}"
             )

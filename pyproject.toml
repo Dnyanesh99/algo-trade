@@ -78,7 +78,7 @@ dev = [
     "bandit>=1.8.5", # Updated from 1.7.5 to 1.8.5
     
     # Analysis & Visualization
-    "jupyter>=7.4.4", # Updated from 1.0.0 to 7.4.4
+    "jupyter>=1.0.0", # No newer version found
     "plotly>=5.17.0", # No newer version found
     "seaborn>=0.12.0", # No newer version found
     "matplotlib>=3.10.3", # Updated from 3.8.0 to 3.10.3
@@ -88,8 +88,9 @@ dev = [
     "mkdocs-material>=9.6.15", # Updated from 9.4.0 to 9.6.15
     
     # Performance profiling
-    "memory-profiler>=1.0.0", # Updated from 0.61.0 to 1.0.0
-    "line-profiler>=2021.01.11.16.17.27", # Updated from 4.1.0 to 2021.01.11.16.17.27 (Note: this versioning seems to be date-based)
+    "memory-profiler>=0.61.0", # Corrected version
+    "line-profiler>=4.1.0", # Corrected version
+    "types-PyYAML>=6.0.0", # Added for mypy support
 ]
 
 test = [

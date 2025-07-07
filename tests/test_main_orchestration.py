@@ -18,12 +18,14 @@ async def test_main_async_historical_mode():
     """
     logger.info("\n--- Starting test_main_async_historical_mode ---")
 
-    with patch('main.KiteAuthenticator') as MockAuthenticator,
-         patch('main.TokenManager') as MockTokenManager,
-         patch('main.KiteRESTClient') as MockRESTClient,
-         patch('main.InstrumentRepo') as MockInstrumentRepo,
-         patch('main.InstrumentManager') as MockInstrumentManager,
-         patch('main.config') as MockConfig:
+    with (
+        patch('main.KiteAuthenticator') as MockAuthenticator,
+        patch('main.TokenManager') as MockTokenManager,
+        patch('main.KiteRESTClient') as MockRESTClient,
+        patch('main.InstrumentRepo') as MockInstrumentRepo,
+        patch('main.InstrumentManager') as MockInstrumentManager,
+        patch('main.config') as MockConfig,
+    ):
 
         # Configure mocks
         mock_authenticator_instance = MockAuthenticator.return_value

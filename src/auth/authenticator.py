@@ -1,6 +1,7 @@
 from kiteconnect import KiteConnect
 from kiteconnect.exceptions import KiteException, NetworkException, TokenException
 
+from src.auth.token_manager import TokenManager
 from src.utils.config_loader import config_loader
 from src.utils.logger import LOGGER as logger
 
@@ -15,8 +16,18 @@ class KiteAuthenticator:
     """
 
     def __init__(self) -> None:
-        self.redirect_url = config.broker.redirect_url
-        self.kite = KiteConnect(api_key=config.broker.api_key)
+        self.redirect_url = config.broker.redirect_url if config.broker and config.broker.redirect_url else ""
+        self.kite = KiteConnect(api_key=config.broker.api_key if config.broker and config.broker.api_key else "")
+        self.token_manager = TokenManager()
+
+    def set_redirect_url(self, new_url: str) -> None:
+        """
+        Sets a new redirect URL for the KiteConnect instance.
+        This is useful when the auth server needs to dynamically assign a port.
+        """
+        self.redirect_url = new_url
+        self.kite.redirect_url = new_url
+        logger.info(f"KiteConnect redirect URL updated to: {new_url}")
 
     def generate_login_url(self) -> str:
         """
@@ -36,7 +47,7 @@ class KiteAuthenticator:
         Exchanges the request token for an access token.
         """
         try:
-            data = self.kite.generate_session(request_token, api_secret=config.broker.api_secret)
+            data = self.kite.generate_session(request_token, api_secret=config.broker.api_secret if config.broker and config.broker.api_secret else "")
             access_token: str = data["access_token"]
             logger.info("Successfully generated KiteConnect session and retrieved access token.")
             return access_token

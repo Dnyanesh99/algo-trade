@@ -2,10 +2,17 @@ from datetime import datetime
 from typing import Optional
 
 import asyncpg
+import pytz
 
 from src.database.db_utils import db_manager
 from src.database.models import FeatureData
+from src.utils.config_loader import config_loader
 from src.utils.logger import LOGGER as logger
+
+config = config_loader.get_config()
+
+# Get the timezone from the config and create a timezone object
+app_timezone = pytz.timezone(config.system.timezone)
 
 
 class FeatureRepository:
@@ -14,7 +21,7 @@ class FeatureRepository:
     Provides methods for inserting and fetching feature data.
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.db_manager = db_manager
 
     async def insert_features(self, instrument_id: int, timeframe: str, features_data: list[FeatureData]) -> str:
@@ -35,7 +42,7 @@ class FeatureRepository:
             ON CONFLICT (instrument_id, timeframe, feature_name, ts) DO UPDATE
             SET feature_value = EXCLUDED.feature_value
         """
-        records = [(d.ts, instrument_id, timeframe, d.feature_name, d.feature_value) for d in features_data]
+        records = [(app_timezone.localize(d.ts) if d.ts.tzinfo is None else d.ts, instrument_id, timeframe, d.feature_name, d.feature_value) for d in features_data]
 
         try:
             async with self.db_manager.transaction() as conn:
@@ -91,7 +98,7 @@ class FeatureRepository:
                 rows = await self.db_manager.fetch_rows(query, instrument_id, timeframe, num_features)
                 rows.reverse()  # Return in chronological order
                 logger.debug(f"Fetched {len(rows)} latest feature records for {instrument_id} ({timeframe}).")
-                return [FeatureData.model_validate(row) for row in rows]
+                return [FeatureData.model_validate(dict(row)) for row in rows]
             except Exception as e:
                 logger.error(f"Error fetching latest features for {instrument_id} ({timeframe}): {e}")
                 raise
@@ -108,7 +115,30 @@ class FeatureRepository:
             try:
                 rows = await self.db_manager.fetch_rows(query, instrument_id, timeframe)
                 logger.debug(f"Fetched all features for the latest timestamp for {instrument_id} ({timeframe}).")
-                return [FeatureData.model_validate(row) for row in rows]
+                return [FeatureData.model_validate(dict(row)) for row in rows]
             except Exception as e:
                 logger.error(f"Error fetching latest features for {instrument_id} ({timeframe}): {e}")
                 raise
+
+    async def get_features_by_instrument(
+        self, instrument_id: int, timeframe: str, start_time: datetime, end_time: datetime
+    ) -> list[FeatureData]:
+        """
+        Fetches features data for a given instrument and timeframe within a time range.
+        Returns properly typed FeatureData objects.
+        """
+        query = """
+            SELECT ts, feature_name, feature_value
+            FROM features
+            WHERE instrument_id = $1 AND timeframe = $2 AND ts BETWEEN $3 AND $4
+            ORDER BY ts ASC, feature_name ASC
+        """
+        try:
+            rows = await self.db_manager.fetch_rows(query, instrument_id, timeframe, start_time, end_time)
+            logger.debug(
+                f"Fetched {len(rows)} feature records for {instrument_id} ({timeframe}) from {start_time} to {end_time}."
+            )
+            return [FeatureData.model_validate(dict(row)) for row in rows]
+        except Exception as e:
+            logger.error(f"Error fetching features data for {instrument_id} ({timeframe}): {e}")
+            raise

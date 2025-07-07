@@ -18,6 +18,9 @@ class HistoricalFetcher:
     """
 
     def __init__(self, rest_client: KiteRESTClient):
+        assert config.data_pipeline is not None
+        assert config.broker is not None
+        assert config.performance is not None
         self.rest_client = rest_client
         self.max_days_per_request = config.data_pipeline.historical_data_max_days_per_request
         self.rate_limiter = RateLimiter("historical_data")

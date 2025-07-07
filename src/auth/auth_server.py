@@ -22,7 +22,7 @@ auth_result = {"success": False, "message": ""}
 # Global instances for authenticator and token manager
 # These must be defined at the module level to be accessible globally
 global_token_manager_instance = TokenManager()
-global_authenticator_instance = KiteAuthenticator(global_token_manager_instance)
+global_authenticator_instance = KiteAuthenticator()
 
 
 class FlaskServer(threading.Thread):
@@ -33,17 +33,24 @@ class FlaskServer(threading.Thread):
         self.srv = make_server(host, port, app)
         self.ctx = app.app_context()
         self.ctx.push()
+        self.stopped = threading.Event()
 
     def run(self) -> None:
         logger.info(f"Starting Flask server on http://{self.host}:{self.port}")
-        self.srv.serve_forever()
+        try:
+            self.srv.serve_forever()
+        finally:
+            self.stopped.set()
 
     def shutdown(self) -> None:
         logger.info("Shutting down Flask server.")
         self.srv.shutdown()
+        if self.srv.socket:
+            self.srv.socket.close()
+        self.stopped.set()
 
 
-@app.route("/auth")  # type: ignore[misc]
+@app.route("/callback")
 def auth_callback() -> str:
     global auth_result
     global global_authenticator_instance
@@ -78,29 +85,62 @@ def auth_callback() -> str:
 
 
 def start_auth_server_and_wait() -> bool:
-    host: Optional[str] = urlparse(config.broker.redirect_url).hostname
-    port: Optional[int] = urlparse(config.broker.redirect_url).port
+    if not config.broker or not config.broker.redirect_url:
+        raise ValueError("Broker redirect URL is not configured.")
 
-    if host is None or port is None:
+    host: Optional[str] = urlparse(config.broker.redirect_url).hostname
+    initial_port: Optional[int] = urlparse(config.broker.redirect_url).port
+
+    if host is None or initial_port is None:
         raise ValueError(f"Invalid redirect URL configured: {config.broker.redirect_url}. Host or port is missing.")
 
-    server = FlaskServer(host, port)
-    server.daemon = True  # Allow the main program to exit even if the server is running
-    server.start()
+    server: FlaskServer
+    current_port = initial_port
+    max_retries = 5
+    for attempt in range(max_retries):
+        try:
+            server = FlaskServer(host, current_port)
+            server.daemon = True  # Allow the main program to exit even if the server is running
+            server.start()
+            # Get the actual port if 0 was used
+            if current_port == 0:
+                current_port = server.srv.socket.getsockname()[1]
+                logger.info(f"Server started on dynamically assigned port: {current_port}")
+            break
+        except OSError as e:
+            if "Address already in use" in str(e):
+                logger.warning(f"Port {current_port} already in use. Attempting to find a new port (attempt {attempt + 1}/{max_retries}).")
+                current_port = 0  # Let the OS choose a random port
+            else:
+                raise
+    else:
+        raise RuntimeError(f"Failed to start Flask server after {max_retries} attempts.")
+
+    # Update the redirect URL in config to reflect the actual port
+    parsed_url = urlparse(config.broker.redirect_url)
+    new_redirect_url = parsed_url._replace(netloc=f"{host}:{current_port}").geturl()
+    config.broker.redirect_url = new_redirect_url
+    logger.info(f"Updated redirect URL in config to: {new_redirect_url}")
+
+    # Update the authenticator's redirect URL
+    global_authenticator_instance.set_redirect_url(new_redirect_url)
 
     # Use the global authenticator instance
     auth_url = global_authenticator_instance.generate_login_url()
     logger.info(f"Opening browser for authentication: {auth_url}")
     webbrowser.open(auth_url)
 
-    # Wait for either success or error event
-    auth_success_event.wait(timeout=300)  # Wait for 5 minutes
-    if not auth_success_event.is_set():
-        logger.error("Authentication timed out or failed to complete.")
-        auth_result["success"] = False
-        auth_result["message"] = "Authentication timed out or failed."
-
-    server.shutdown()
-    server.join()  # Ensure the server thread has completely shut down
+    try:
+        # Wait for either success or error event
+        auth_success_event.wait(timeout=300)  # Wait for 5 minutes
+        if not auth_success_event.is_set():
+            logger.error("Authentication timed out or failed to complete.")
+            auth_result["success"] = False
+            auth_result["message"] = "Authentication timed out or failed."
+    finally:
+        logger.debug("Attempting to shut down Flask server.")
+        server.shutdown()
+        server.join()  # Ensure the server thread has completely shut down
+        server.stopped.wait(timeout=5) # Wait for the server to confirm it's stopped
 
     return bool(auth_result["success"])

@@ -2,9 +2,7 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from kiteconnect import KiteTicker
 
-from src.auth.token_manager import TokenManager
 from src.broker.websocket_client import KiteWebSocketClient
 from src.utils.config_loader import config_loader
 from src.utils.logger import LOGGER as logger
@@ -48,7 +46,7 @@ async def test_connect_disconnect(mock_token_manager, mock_kite_ticker):
     logger.info("\n--- Starting test_connect_disconnect ---")
     mock_token_manager.get_access_token.return_value = "test_access_token"
     ws_client = KiteWebSocketClient(lambda x: None, lambda x: None, lambda: None)
-    
+
     # Mock the blocking connect call
     with patch('src.broker.websocket_client.asyncio.to_thread', new=AsyncMock()):
         await ws_client.connect()
@@ -81,7 +79,7 @@ async def test_on_ticks_callback():
     logger.info("\n--- Starting test_on_ticks_callback ---")
     mock_callback = MagicMock()
     ws_client = KiteWebSocketClient(mock_callback, lambda x: None, lambda: None)
-    
+
     test_ticks = [{"instrument_token": 1, "last_traded_price": 100}]
     ws_client._on_ticks(None, test_ticks) # ws argument is usually None for KiteTicker callbacks
     mock_callback.assert_called_once_with(test_ticks)

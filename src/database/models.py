@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 
 class InstrumentData(BaseModel):
@@ -17,6 +17,18 @@ class InstrumentData(BaseModel):
     instrument_type: str
     segment: Optional[str] = None
     exchange: str
+
+    @field_validator("expiry", mode="before")
+    @classmethod
+    def validate_expiry(cls, v):
+        if v is None or v == "" or v == "None":
+            return None
+        return v
+
+
+class InstrumentRecord(InstrumentData):
+    instrument_id: int
+    last_updated: datetime
 
 
 class OHLCVData(BaseModel):

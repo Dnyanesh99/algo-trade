@@ -34,37 +34,38 @@ class LoggerSetup:
         logger.remove()
 
         # Ensure log directory exists
-        log_file_path = Path(config.logging.file)
-        log_file_path.parent.mkdir(parents=True, exist_ok=True)
+        if config.logging:
+            log_file_path = Path(config.logging.file)
+            log_file_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Add file logging with comprehensive settings
-        # For production, consider serialize=True for structured JSON logs
-        # which are easier for log aggregation systems (e.g., ELK, Splunk).
-        logger.add(
-            config.logging.file,
-            level=config.logging.level,
-            format=config.logging.format,
-            rotation=config.logging.rotation,
-            compression=config.logging.compression,
-            retention=config.logging.retention,
-            enqueue=True,
-            backtrace=True,
-            diagnose=True,
-            catch=True,
-            serialize=True,  # Changed to True for structured logging
-        )
+            # Add file logging with comprehensive settings
+            # For production, consider serialize=True for structured JSON logs
+            # which are easier for log aggregation systems (e.g., ELK, Splunk).
+            logger.add(
+                config.logging.file,
+                level=config.logging.level,
+                format=config.logging.format,
+                rotation=config.logging.rotation,
+                compression=config.logging.compression,
+                retention=config.logging.retention,
+                enqueue=True,
+                backtrace=True,
+                diagnose=True,
+                catch=True,
+                serialize=False,  # Changed to False for readable logs
+            )
 
-        # Add console logging for development/debugging
-        logger.add(
-            sys.stderr,
-            level=config.logging.level,
-            format=config.logging.format,
-            colorize=True,
-            enqueue=True,
-            backtrace=False,
-            diagnose=False,
-            catch=True,
-        )
+            # Add console logging for development/debugging
+            logger.add(
+                sys.stderr,
+                level=config.logging.level,
+                format=config.logging.format,
+                colorize=True,
+                enqueue=True,
+                backtrace=False,
+                diagnose=False,
+                catch=True,
+            )
 
         # Configure standard logging to work with Loguru
         # This ensures third-party libraries using standard logging are captured
@@ -87,7 +88,10 @@ class LoggerSetup:
                 logger.opt(depth=depth, exception=record.exc_info).log(level, record.getMessage())
 
         # Replace standard logging
-        logging.basicConfig(handlers=[InterceptHandler()], level=getattr(logging, config.logging.level), force=True)
+        if config.logging:
+            logging.basicConfig(handlers=[InterceptHandler()], level=getattr(logging, config.logging.level), force=True)
+        else:
+            logging.basicConfig(handlers=[InterceptHandler()], level=logging.INFO, force=True)
 
         # Disable some noisy loggers
         logging.getLogger("urllib3").setLevel(logging.WARNING)

@@ -1,12 +1,10 @@
 import asyncio
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
-from kiteconnect import KiteConnect
-from kiteconnect.exceptions import KiteException, NetworkException, TokenException
+from kiteconnect.exceptions import TokenException
 
 from src.auth.authenticator import KiteAuthenticator
-from src.auth.token_manager import TokenManager
 from src.utils.config_loader import config_loader
 from src.utils.logger import LOGGER as logger
 

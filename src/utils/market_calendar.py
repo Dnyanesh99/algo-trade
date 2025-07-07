@@ -22,15 +22,30 @@ class MarketCalendar:
     """
 
     def __init__(self) -> None:
-        self.tz = pytz.timezone(config.system.timezone)
-        self.market_open_time = datetime.strptime(config.market_calendar.market_open_time, "%H:%M").time()
-        self.market_close_time = datetime.strptime(config.market_calendar.market_close_time, "%H:%M").time()
-        self.holidays: list[date] = self._load_holidays()
-        self.muhurat_trading_sessions: list[SpecialSession] = config.market_calendar.muhurat_trading_sessions
-        self.half_day_sessions: list[SpecialSession] = config.market_calendar.half_day_sessions
+        if config.system:
+            self.tz = pytz.timezone(config.system.timezone)
+        else:
+            logger.warning("System configuration not found. Using default timezone 'Asia/Kolkata'.")
+            self.tz = pytz.timezone("Asia/Kolkata")
+
+        if config.market_calendar:
+            self.market_open_time = datetime.strptime(config.market_calendar.market_open_time, "%H:%M").time()
+            self.market_close_time = datetime.strptime(config.market_calendar.market_close_time, "%H:%M").time()
+            self.holidays: list[date] = self._load_holidays()
+            self.muhurat_trading_sessions: list[SpecialSession] = config.market_calendar.muhurat_trading_sessions
+            self.half_day_sessions: list[SpecialSession] = config.market_calendar.half_day_sessions
+        else:
+            logger.warning("Market calendar configuration not found. Using default market hours and no holidays.")
+            self.market_open_time = time(9, 15)
+            self.market_close_time = time(15, 30)
+            self.holidays = []
+            self.muhurat_trading_sessions = []
+            self.half_day_sessions = []
 
     def _load_holidays(self) -> list[date]:
-        return [datetime.strptime(d, "%Y-%m-%d").date() for d in config.market_calendar.holidays]
+        if config.market_calendar:
+            return [datetime.strptime(d, "%Y-%m-%d").date() for d in config.market_calendar.holidays]
+        return []
 
     def _is_muhurat_trading(self, dt_local: datetime) -> bool:
         """

@@ -2,7 +2,6 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-import asyncpg
 
 from src.database.db_utils import DatabaseManager
 from src.database.instrument_repo import InstrumentRepository
@@ -18,10 +17,10 @@ async def setup_instrument_repo():
     DatabaseManager._instance = None
     DatabaseManager._pool = None
     db_manager_instance = DatabaseManager()
-    
+
     with patch('src.database.db_utils.asyncpg.create_pool', new=AsyncMock()):
         await db_manager_instance.initialize()
-        
+
         # Mock the db_manager for the repository
         with patch('src.database.instrument_repo.db_manager', new=db_manager_instance):
             repo = InstrumentRepository()
@@ -33,7 +32,7 @@ async def setup_instrument_repo():
 async def test_insert_instrument(setup_instrument_repo):
     logger.info("\n--- Starting test_insert_instrument ---")
     repo = setup_instrument_repo
-    
+
     instrument_data = {
         "instrument_token": 12345,
         "exchange_token": "EXCH123",
@@ -60,7 +59,7 @@ async def test_insert_instrument(setup_instrument_repo):
 async def test_update_instrument(setup_instrument_repo):
     logger.info("\n--- Starting test_update_instrument ---")
     repo = setup_instrument_repo
-    
+
     instrument_id = 1
     instrument_data = {
         "instrument_token": 12345,
@@ -88,7 +87,7 @@ async def test_update_instrument(setup_instrument_repo):
 async def test_get_instrument_by_tradingsymbol(setup_instrument_repo):
     logger.info("\n--- Starting test_get_instrument_by_tradingsymbol ---")
     repo = setup_instrument_repo
-    
+
     tradingsymbol = "TESTSYM"
     exchange = "NSE"
     mock_record = MagicMock(instrument_token=12345, tradingsymbol="TESTSYM")
@@ -103,7 +102,7 @@ async def test_get_instrument_by_tradingsymbol(setup_instrument_repo):
 async def test_get_instrument_by_token(setup_instrument_repo):
     logger.info("\n--- Starting test_get_instrument_by_token ---")
     repo = setup_instrument_repo
-    
+
     instrument_token = 12345
     mock_record = MagicMock(instrument_token=12345, tradingsymbol="TESTSYM")
     repo.db_manager.get_connection.return_value.__aenter__.return_value.fetchrow = AsyncMock(return_value=mock_record)
@@ -117,7 +116,7 @@ async def test_get_instrument_by_token(setup_instrument_repo):
 async def test_get_all_instruments(setup_instrument_repo):
     logger.info("\n--- Starting test_get_all_instruments ---")
     repo = setup_instrument_repo
-    
+
     mock_records = [MagicMock(instrument_token=1, tradingsymbol="SYM1"), MagicMock(instrument_token=2, tradingsymbol="SYM2")]
     repo.db_manager.get_connection.return_value.__aenter__.return_value.fetch = AsyncMock(return_value=mock_records)
 
@@ -130,7 +129,7 @@ async def test_get_all_instruments(setup_instrument_repo):
 async def test_get_instruments_by_type(setup_instrument_repo):
     logger.info("\n--- Starting test_get_instruments_by_type ---")
     repo = setup_instrument_repo
-    
+
     instrument_type = "EQ"
     exchange = "NSE"
     mock_records = [MagicMock(instrument_token=1, tradingsymbol="SYM1")]

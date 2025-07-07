@@ -4,7 +4,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from src.broker.connection_manager import ConnectionManager
-from src.broker.websocket_client import KiteWebSocketClient
 from src.utils.config_loader import config_loader
 from src.utils.logger import LOGGER as logger
 

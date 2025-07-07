@@ -1,9 +1,18 @@
 from datetime import datetime
 from typing import Any
 
+import asyncpg
+import pytz
+
 from src.database.db_utils import db_manager
 from src.database.models import LabelData
+from src.utils.config_loader import config_loader
 from src.utils.logger import LOGGER as logger
+
+config = config_loader.get_config()
+
+# Get the timezone from the config and create a timezone object
+app_timezone = pytz.timezone(config.system.timezone)
 
 
 class LabelRepository:
@@ -44,7 +53,7 @@ class LabelRepository:
         """
         records = [
             (
-                d.ts,
+                app_timezone.localize(d.ts) if d.ts.tzinfo is None else d.ts,
                 instrument_id,
                 d.timeframe,
                 d.label,
@@ -88,7 +97,7 @@ class LabelRepository:
             logger.debug(
                 f"Fetched {len(rows)} label records for {instrument_id} ({timeframe}) from {start_time} to {end_time}."
             )
-            return [LabelData.model_validate(row) for row in rows]
+            return [LabelData.model_validate(dict(row)) for row in rows]
         except Exception as e:
             logger.error(f"Error fetching labels data for {instrument_id} ({timeframe}): {e}")
             raise
@@ -123,3 +132,12 @@ class LabelRepository:
         except Exception as e:
             logger.error(f"Error fetching label statistics for {instrument_id} ({timeframe}): {e}")
             raise
+
+    async def get_labels_by_instrument(
+        self, instrument_id: int, timeframe: str, start_time: datetime, end_time: datetime
+    ) -> list[LabelData]:
+        """
+        Fetches labels data for a given instrument and timeframe within a time range.
+        Alias for get_labels method for consistent API.
+        """
+        return await self.get_labels(instrument_id, timeframe, start_time, end_time)

@@ -3,7 +3,6 @@ from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-import asyncpg
 
 from src.database.db_utils import DatabaseManager
 from src.database.ohlcv_repo import OHLCVRepository
@@ -19,10 +18,10 @@ async def setup_ohlcv_repo():
     DatabaseManager._instance = None
     DatabaseManager._pool = None
     db_manager_instance = DatabaseManager()
-    
+
     with patch('src.database.db_utils.asyncpg.create_pool', new=AsyncMock()):
         await db_manager_instance.initialize()
-        
+
         # Mock the db_manager for the repository
         with patch('src.database.ohlcv_repo.db_manager', new=db_manager_instance):
             repo = OHLCVRepository()
@@ -34,7 +33,7 @@ async def setup_ohlcv_repo():
 async def test_insert_ohlcv_data(setup_ohlcv_repo):
     logger.info("\n--- Starting test_insert_ohlcv_data ---")
     repo = setup_ohlcv_repo
-    
+
     instrument_id = 1
     timeframe = "5min"
     sample_ohlcv = [
@@ -54,7 +53,7 @@ async def test_insert_ohlcv_data(setup_ohlcv_repo):
 async def test_get_ohlcv_data(setup_ohlcv_repo):
     logger.info("\n--- Starting test_get_ohlcv_data ---")
     repo = setup_ohlcv_repo
-    
+
     instrument_id = 1
     timeframe = "5min"
     start_time = datetime(2023, 1, 1, 9, 0)
@@ -72,7 +71,7 @@ async def test_get_ohlcv_data(setup_ohlcv_repo):
 async def test_get_latest_candle(setup_ohlcv_repo):
     logger.info("\n--- Starting test_get_latest_candle ---")
     repo = setup_ohlcv_repo
-    
+
     instrument_id = 1
     timeframe = "5min"
 
@@ -89,7 +88,7 @@ async def test_get_latest_candle(setup_ohlcv_repo):
 async def test_get_ohlcv_data_for_features(setup_ohlcv_repo):
     logger.info("\n--- Starting test_get_ohlcv_data_for_features ---")
     repo = setup_ohlcv_repo
-    
+
     instrument_id = 1
     timeframe = "5min"
     limit = 2

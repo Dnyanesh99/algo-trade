@@ -24,6 +24,7 @@ class CandleBuffer:
         timeframes: Optional[list[int]] = None,
         persistence_path: Optional[Path] = None,
     ):
+        assert config.candle_buffer is not None
         self.on_candle_complete_callback = on_candle_complete_callback
         self.timeframes = timeframes or config.candle_buffer.timeframes
         self._partial_candles: dict[int, dict[int, dict[str, Any]]] = {}

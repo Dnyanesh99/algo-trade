@@ -2,7 +2,7 @@
 
 import asyncio
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 
 import pandas as pd
 from pydantic import BaseModel, Field
@@ -63,6 +63,9 @@ class HistoricalAggregator:
         self.candle_validator = CandleValidator()
 
         # Configuration from config.yaml
+        assert config.trading is not None
+        assert config.performance is not None
+        assert config.data_quality is not None
         self.timeframes = config.trading.aggregation_timeframes
         self.batch_size = config.performance.processing.batch_size
         self.validation_enabled = config.data_quality.validation.enabled
@@ -192,9 +195,22 @@ class HistoricalAggregator:
 
         try:
             logger.info(f"Aggregating to {timeframe_str} for instrument {instrument_id}")
+            # Build aggregation dict based on available columns
+            agg_dict = {
+                "open": "first", 
+                "high": "max", 
+                "low": "min", 
+                "close": "last", 
+                "volume": "sum"
+            }
+            
+            # Only include 'oi' if it exists in the dataframe
+            if "oi" in df_prepared.columns:
+                agg_dict["oi"] = "last"
+            
             aggregated_df = (
                 df_prepared.resample(timeframe_str)
-                .agg({"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum", "oi": "last"})
+                .agg(agg_dict)
                 .dropna()
             )
 
@@ -240,7 +256,7 @@ class HistoricalAggregator:
                         )
                 aggregated_df = validation_result.cleaned_data.set_index("timestamp")
 
-            ohlcv_records = aggregated_df.reset_index().rename(columns={"index": "ts"}).to_dict(orient="records")
+            ohlcv_records = aggregated_df.reset_index().rename(columns={"timestamp": "ts"}).to_dict(orient="records")
             stored_rows = await self._store_with_retry(instrument_id, timeframe_str, ohlcv_records)
             processing_time = (datetime.now() - tf_start_time).total_seconds() * 1000
 
@@ -309,11 +325,11 @@ class HistoricalAggregator:
                 await asyncio.sleep(2**attempt)
         return 0
 
-    async def get_aggregation_health(self) -> dict:
+    async def get_aggregation_health(self) -> dict[str, Any]:
         """Get health status of the historical aggregator."""
         try:
             # This would typically fetch real-time status from HealthMonitor
-            health_status = {}
+            health_status: dict[str, Any] = {}
             return {
                 "component": "historical_aggregator",
                 "status": health_status.get("status", "unknown"),

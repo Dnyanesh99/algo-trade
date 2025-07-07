@@ -28,9 +28,23 @@ class TimeSynchronizer:
     """
 
     def __init__(self) -> None:
-        self.candle_interval_minutes = config.time_synchronizer.candle_interval_minutes
-        self.latency_buffer_seconds = config.time_synchronizer.latency_buffer_seconds
-        self.timezone = config.system.timezone
+        if config.time_synchronizer:
+            self.candle_interval_minutes = config.time_synchronizer.candle_interval_minutes
+            self.latency_buffer_seconds = config.time_synchronizer.latency_buffer_seconds
+            self.max_sync_attempts = config.time_synchronizer.max_sync_attempts
+            self.sync_tolerance_seconds = config.time_synchronizer.sync_tolerance_seconds
+        else:
+            logger.warning("Time synchronizer configuration not found. Using default values.")
+            self.candle_interval_minutes = 15  # Default
+            self.latency_buffer_seconds = 2    # Default
+            self.max_sync_attempts = 3         # Default
+            self.sync_tolerance_seconds = 2.0  # Default
+
+        if config.system:
+            self.timezone = config.system.timezone
+        else:
+            logger.warning("System configuration not found. Using default timezone 'Asia/Kolkata'.")
+            self.timezone = "Asia/Kolkata"
 
         # Validate configuration
         if self.candle_interval_minutes <= 0:
@@ -44,10 +58,6 @@ class TimeSynchronizer:
         except pytz.UnknownTimeZoneError:
             logger.error(f"Unknown timezone: {self.timezone}. Falling back to Asia/Kolkata.")
             self.tz = pytz.timezone("Asia/Kolkata")
-
-        # Synchronization parameters from config
-        self.max_sync_attempts = config.time_synchronizer.max_sync_attempts
-        self.sync_tolerance_seconds = config.time_synchronizer.sync_tolerance_seconds
 
         logger.info(
             f"TimeSynchronizer initialized: {self.candle_interval_minutes}min intervals, "

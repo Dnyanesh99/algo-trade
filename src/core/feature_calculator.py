@@ -1,7 +1,8 @@
 import asyncio
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
+import numpy as np
 import pandas as pd
 from pydantic import BaseModel, Field
 
@@ -15,6 +16,7 @@ from src.utils.config_loader import config_loader
 from src.utils.logger import LOGGER as logger
 from src.utils.performance_metrics import PerformanceMetrics
 
+talib: Optional[Any]
 try:
     import talib
 except ImportError:
@@ -59,6 +61,8 @@ class FeatureCalculator:
         self.health_monitor = health_monitor
         self.performance_metrics = performance_metrics
         self.feature_validator = FeatureValidator()
+        assert config.trading is not None
+        assert config.data_quality is not None
         self.timeframes = config.trading.feature_timeframes
         self.lookback_period = config.trading.features.lookback_period
         self.validation_enabled = config.data_quality.validation.enabled
@@ -70,17 +74,18 @@ class FeatureCalculator:
     def _load_feature_configs(self) -> list[FeatureConfig]:
         """Loads and parses feature configurations from config.yaml."""
         try:
+            assert config.trading is not None and config.trading.features is not None
             features_list = config.trading.features.configurations
             return [FeatureConfig(**fc) for fc in features_list]
         except Exception as e:
             logger.error(f"Error loading feature configurations: {e}")
             return []
 
-    def _get_params_for_timeframe(self, feature_config: FeatureConfig, timeframe: int) -> dict:
+    def _get_params_for_timeframe(self, feature_config: FeatureConfig, timeframe: int) -> dict[str, Any]:
         """Merges default and timeframe-specific parameters."""
         tf_key = f"{timeframe}m"
-        default_params = feature_config.params.get("default", {})
-        tf_params = feature_config.params.get(tf_key, {})
+        default_params: dict[str, Any] = feature_config.params.get("default", {})
+        tf_params: dict[str, Any] = feature_config.params.get(tf_key, {})
         final_params = default_params.copy()
         final_params.update(tf_params)
         return final_params
@@ -94,7 +99,7 @@ class FeatureCalculator:
         ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        final_results = []
+        final_results: list[FeatureCalculationResult] = []
         for res in results:
             if isinstance(res, Exception):
                 await self.error_handler.handle_error(
@@ -102,7 +107,7 @@ class FeatureCalculator:
                     f"Unhandled exception in timeframe calculation for instrument {instrument_id}: {res}",
                     {"instrument_id": instrument_id},
                 )
-            else:
+            elif isinstance(res, FeatureCalculationResult):
                 final_results.append(res)
         return final_results
 
@@ -147,6 +152,7 @@ class FeatureCalculator:
                     tf_start_time,
                 )
 
+            # Add timestamp column and handle NaN values
             features_df["timestamp"] = df.index
             features_df = features_df.dropna().reset_index(drop=True)
 
@@ -161,26 +167,52 @@ class FeatureCalculator:
                     )
                 features_df = cleaned_df
 
-            latest_features = features_df[features_df.timestamp == features_df.timestamp.max()]
-            if latest_features.empty:
-                return self._create_failure_result(
-                    instrument_id,
-                    timeframe_str,
-                    latest_candle_timestamp,
-                    ["No features available for the latest timestamp after cleaning."],
-                    tf_start_time,
-                )
+            # Handle different modes: HISTORICAL_MODE stores all features, LIVE_MODE stores only latest
+            system_config = config.get_system_config()
+            
+            if system_config.mode == "HISTORICAL_MODE":
+                # For historical/training mode, store ALL features for all timestamps
+                if features_df.empty:
+                    return self._create_failure_result(
+                        instrument_id,
+                        timeframe_str,
+                        latest_candle_timestamp,
+                        ["No features available after cleaning."],
+                        tf_start_time,
+                    )
 
-            features_to_insert = latest_features.drop(columns=["timestamp"]).melt(
-                var_name="feature_name", value_name="feature_value"
-            )
-            features_to_insert["ts"] = latest_features["timestamp"].iloc[0]
-            features_to_insert["feature_value"] = features_to_insert["feature_value"].astype(float)
+                # Melt all features for all timestamps
+                features_to_insert = features_df.melt(
+                    id_vars=["timestamp"], 
+                    var_name="feature_name", 
+                    value_name="feature_value"
+                )
+                features_to_insert = features_to_insert.rename(columns={"timestamp": "ts"})
+                features_to_insert["feature_value"] = features_to_insert["feature_value"].astype(float)
+                features_to_insert = features_to_insert.dropna()
+                
+            else:
+                # For live mode, store only the latest features
+                latest_features = features_df[features_df.timestamp == features_df.timestamp.max()]
+                if latest_features.empty:
+                    return self._create_failure_result(
+                        instrument_id,
+                        timeframe_str,
+                        latest_candle_timestamp,
+                        ["No features available for the latest timestamp after cleaning."],
+                        tf_start_time,
+                    )
+
+                features_to_insert = latest_features.drop(columns=["timestamp"]).melt(
+                    var_name="feature_name", value_name="feature_value"
+                )
+                features_to_insert["ts"] = latest_features["timestamp"].iloc[0]
+                features_to_insert["feature_value"] = features_to_insert["feature_value"].astype(float)
 
             # Convert to FeatureData models
             feature_models = [
                 FeatureData(
-                    ts=features_to_insert["ts"].iloc[0],
+                    ts=row["ts"],
                     feature_name=row["feature_name"],
                     feature_value=row["feature_value"],
                 )
@@ -217,8 +249,10 @@ class FeatureCalculator:
     async def _calculate_all_features(self, df: pd.DataFrame, timeframe_minutes: int) -> pd.DataFrame:
         loop = asyncio.get_running_loop()
 
-        def _run_calculations():
+        def _run_calculations() -> pd.DataFrame:
             features_dict = {}
+            expected_length = len(df)
+            
             for fc in self.feature_configs:
                 try:
                     params = self._get_params_for_timeframe(fc, timeframe_minutes)
@@ -226,50 +260,77 @@ class FeatureCalculator:
                     if result is not None:
                         if isinstance(result, pd.DataFrame):
                             for col in result.columns:
-                                features_dict[f"{fc.name}_{col}"] = result[col]
+                                # Ensure the Series has the same length as the DataFrame
+                                series_data = result[col]
+                                if len(series_data) != expected_length:
+                                    # Reindex to match the expected length
+                                    series_data = series_data.reindex(range(expected_length))
+                                features_dict[f"{fc.name}_{col}"] = series_data
                         else:
+                            # Ensure the Series has the same length as the DataFrame
+                            if len(result) != expected_length:
+                                # Reindex to match the expected length
+                                result = result.reindex(range(expected_length))
                             features_dict[fc.name] = result
                 except Exception as e:
                     logger.error(f"Failed to calculate feature '{fc.name}' for {timeframe_minutes}m: {e}")
-            return pd.DataFrame(features_dict)
+            
+            if features_dict:
+                features_df = pd.DataFrame(features_dict, index=df.index)
+                logger.debug(f"Calculated {len(features_dict)} features with {len(features_df)} rows for {timeframe_minutes}m")
+                return features_df
+            else:
+                logger.warning(f"No features calculated for {timeframe_minutes}m timeframe")
+                return pd.DataFrame()
 
         return await loop.run_in_executor(None, _run_calculations)
 
     def _calculate_single_feature(
         self, df: pd.DataFrame, func_name: str, params: dict
-    ) -> Optional[pd.Series | pd.DataFrame]:
-        open, high, low, close, volume = (df["open"], df["high"], df["low"], df["close"], df["volume"])
-        if talib and hasattr(talib, func_name):
-            func = getattr(talib, func_name)
-            if func_name in ["ADX", "ATR", "CCI", "SAR", "TRANGE", "ULTOSC"]:
-                return func(high, low, close, **params)
-            if func_name in ["AROON", "CMO", "RSI", "WILLR"]:
+    ) -> Optional[Union[pd.Series, pd.DataFrame]]:
+        try:
+            open, high, low, close, volume = (df["open"], df["high"], df["low"], df["close"], df["volume"])
+            if talib and hasattr(talib, func_name):
+                func = getattr(talib, func_name)
+                if func_name == "SAR":
+                    return func(high, low, acceleration=params["acceleration"], maximum=params["maximum"])
+                if func_name == "AROON":
+                    aroon_down, aroon_up = func(high, low, timeperiod=params["timeperiod"])
+                    return pd.DataFrame({"down": aroon_down, "up": aroon_up})
+                if func_name == "WILLR":
+                    return func(high, low, close, timeperiod=params["timeperiod"])
+                if func_name in ["ADX", "ATR", "CCI", "TRANGE", "ULTOSC"]:
+                    return func(high, low, close, **params)
+                if func_name in ["CMO", "RSI"]:
+                    return func(close, **params)
+                if func_name == "OBV":
+                    return func(close, volume, **params)
+                if func_name == "ADOSC":
+                    return func(high, low, close, volume, **params)
+                if func_name == "STOCH":
+                    k, d = func(high, low, close, **params)
+                    return pd.DataFrame({"k": k, "d": d})
+                if func_name == "MACD":
+                    macd, macdsignal, macdhist = func(close, **params)
+                    return pd.DataFrame({"line": macd, "signal": macdsignal, "hist": macdhist})
+                if func_name == "BBANDS":
+                    upper, middle, lower = func(close, **params)
+                    return pd.DataFrame({"upper": upper, "middle": middle, "lower": lower})
+                if func_name in ["HT_TRENDLINE", "HT_DCPERIOD", "BOP", "HT_PHASOR"]:
+                    if func_name == "BOP":
+                        return func(open, high, low, close)
+                    if func_name == "HT_PHASOR":
+                        inphase, quadrature = func(close)
+                        return pd.DataFrame({"inphase": inphase, "quadrature": quadrature})
+                    return func(close)
                 return func(close, **params)
-            if func_name == "OBV":
-                return func(close, volume, **params)
-            if func_name == "ADOSC":
-                return func(high, low, close, volume, **params)
-            if func_name == "STOCH":
-                k, d = func(high, low, close, **params)
-                return pd.DataFrame({"k": k, "d": d})
-            if func_name == "MACD":
-                macd, macdsignal, macdhist = func(close, **params)
-                return pd.DataFrame({"line": macd, "signal": macdsignal, "hist": macdhist})
-            if func_name == "BBANDS":
-                upper, middle, lower = func(close, **params)
-                return pd.DataFrame({"upper": upper, "middle": middle, "lower": lower})
-            if func_name in ["HT_TRENDLINE", "HT_DCPERIOD", "BOP", "HT_PHASOR"]:
-                if func_name == "BOP":
-                    return func(open, high, low, close)
-                if func_name == "HT_PHASOR":
-                    inphase, quadrature = func(close)
-                    return pd.DataFrame({"inphase": inphase, "quadrature": quadrature})
-                return func(close)
-            return func(close, **params)
-        logger.debug(f"Function {func_name} not found in TA-Lib or TA-Lib is not installed.")
-        return None
+            logger.debug(f"Function {func_name} not found in TA-Lib or TA-Lib is not installed.")
+            return None
+        except Exception as e:
+            logger.error(f"Error calculating feature {func_name}: {e}")
+            return None
 
-    def _create_failure_result(self, instrument_id, timeframe_str, timestamp, errors, start_time):
+    def _create_failure_result(self, instrument_id: int, timeframe_str: str, timestamp: datetime, errors: list[str], start_time: datetime) -> FeatureCalculationResult:
         processing_time = (datetime.now() - start_time).total_seconds() * 1000
         return FeatureCalculationResult(
             success=False,

@@ -1,7 +1,7 @@
 from typing import Optional
 
 from src.database.db_utils import db_manager
-from src.database.models import InstrumentData
+from src.database.models import InstrumentData, InstrumentRecord
 from src.utils.logger import LOGGER as logger
 
 
@@ -85,7 +85,7 @@ class InstrumentRepository:
             logger.error(f"Error updating instrument ID {instrument_id}: {e}")
             return False
 
-    async def get_instrument_by_tradingsymbol(self, tradingsymbol: str, exchange: str) -> Optional[InstrumentData]:
+    async def get_instrument_by_tradingsymbol(self, tradingsymbol: str, exchange: str) -> Optional[InstrumentRecord]:
         """
         Retrieves an instrument by its trading symbol and exchange.
         """
@@ -93,12 +93,12 @@ class InstrumentRepository:
         try:
             async with self.db_manager.get_connection() as conn:
                 record = await conn.fetchrow(query, tradingsymbol, exchange)
-                return InstrumentData.model_validate(record) if record else None
+                return InstrumentRecord.model_validate(dict(record)) if record else None
         except Exception as e:
-            logger.error(f"Error fetching instrument by tradingsymbol {tradingsymbol} on {exchange}: {e}")
+            logger.error(f"Error retrieving instrument by tradingsymbol {tradingsymbol}: {e}")
             return None
 
-    async def get_instrument_by_token(self, instrument_token: int) -> Optional[InstrumentData]:
+    async def get_instrument_by_token(self, instrument_token: int) -> Optional[InstrumentRecord]:
         """
         Retrieves an instrument by its instrument token.
         """
@@ -106,12 +106,12 @@ class InstrumentRepository:
         try:
             async with self.db_manager.get_connection() as conn:
                 record = await conn.fetchrow(query, instrument_token)
-                return InstrumentData.model_validate(record) if record else None
+                return InstrumentRecord.model_validate(dict(record)) if record else None
         except Exception as e:
-            logger.error(f"Error fetching instrument by token {instrument_token}: {e}")
+            logger.error(f"Error retrieving instrument by token {instrument_token}: {e}")
             return None
 
-    async def get_all_instruments(self) -> list[InstrumentData]:
+    async def get_all_instruments(self) -> list[InstrumentRecord]:
         """
         Retrieves all instruments stored in the database.
         """
@@ -119,7 +119,7 @@ class InstrumentRepository:
         try:
             async with self.db_manager.get_connection() as conn:
                 records = await conn.fetch(query)
-                return [InstrumentData.model_validate(record) for record in records]
+                return [InstrumentRecord.model_validate(dict(record)) for record in records]
         except Exception as e:
             logger.error(f"Error fetching all instruments: {e}")
             return []
@@ -132,7 +132,7 @@ class InstrumentRepository:
         try:
             async with self.db_manager.get_connection() as conn:
                 records = await conn.fetch(query, instrument_type, exchange)
-                return [InstrumentData.model_validate(record) for record in records]
+                return [InstrumentRecord.model_validate(dict(record)) for record in records]
         except Exception as e:
             logger.error(f"Error fetching instruments by type {instrument_type} on {exchange}: {e}")
             return []

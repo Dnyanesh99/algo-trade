@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 from typing import Any, Optional
 
 import pandas as pd
-from pydantic import BaseModel, Field, root_validator
+from pydantic import BaseModel, Field, ValidationInfo, field_validator
 
 from src.utils.config_loader import config_loader
 from src.utils.data_quality import DataQualityReport, DataValidator
@@ -29,25 +29,23 @@ class CandleData(BaseModel):
     volume: int = Field(..., ge=0, description="Volume")
     oi: Optional[int] = Field(None, ge=0, description="Open interest")
 
-    @root_validator
-    def validate_ohlc_relationships(cls, values):
-        """Validate relationships between OHLC fields after individual validation."""
-        open_price, high_price, low_price, close_price = (
-            values.get("open"),
-            values.get("high"),
-            values.get("low"),
-            values.get("close"),
-        )
+    @field_validator("high")
+    def validate_high(cls, v: float, info: ValidationInfo) -> float:
+        if "low" in info.data and v < info.data["low"]:
+            raise ValueError(f'High price {v} cannot be less than low price {info.data["low"]}')
+        if "open" in info.data and "close" in info.data and v < max(info.data["open"], info.data["close"]):
+            raise ValueError(
+                f'High price {v} must be >= max(open={info.data["open"]}), close={info.data["close"]})'
+            )
+        return v
 
-        if all((open_price, high_price, low_price, close_price)):
-            if high_price < low_price:
-                raise ValueError(f"High price {high_price} must be >= low price {low_price}")
-            if high_price < max(open_price, close_price):
-                raise ValueError(f"High price {high_price} must be >= max(open={open_price}, close={close_price})")
-            if low_price > min(open_price, close_price):
-                raise ValueError(f"Low price {low_price} must be <= min(open={open_price}, close={close_price})")
-
-        return values
+    @field_validator("low")
+    def validate_low(cls, v: float, info: ValidationInfo) -> float:
+        if "open" in info.data and "close" in info.data and v > min(info.data["open"], info.data["close"]):
+            raise ValueError(
+                f'Low price {v} must be <= min(open={info.data["open"]}), close={info.data["close"]})'
+            )
+        return v
 
 
 @dataclass
@@ -67,6 +65,7 @@ class CandleValidator:
     """
 
     def __init__(self) -> None:
+        assert config.data_quality is not None
         self.validation_config = config.data_quality.validation
         self.outlier_config = config.data_quality.outlier_detection
         self.time_series_config = config.data_quality.time_series
@@ -139,7 +138,14 @@ class CandleValidator:
                 rows_removed = nan_rows_before - df_work.isnull().any(axis=1).sum()
                 issues.append(f"Removed {rows_removed} rows with NaN values in critical columns.")
 
-            df_work = df_work[(df_work[required_columns[1:]] > 0).all(axis=1)]
+            # Apply validation for price columns (must be > 0) and volume (>= 0 for indices, > 0 for stocks)
+            price_columns = ["open", "high", "low", "close"]
+            price_valid = (df_work[price_columns] > 0).all(axis=1)
+            
+            # For volume, allow >= 0 (to accommodate indices with 0 volume)
+            volume_valid = df_work["volume"] >= 0
+            
+            df_work = df_work[price_valid & volume_valid]
 
             ohlc_violations = 0
             high_violations = (df_work["high"] < df_work[["open", "close"]].max(axis=1)).sum()

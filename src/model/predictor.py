@@ -12,7 +12,7 @@ from pydantic import BaseModel
 
 from src.state.error_handler import ErrorHandler
 from src.state.health_monitor import HealthMonitor
-from src.utils.config_loader import config_loader
+from src.utils.config_loader import ModelTrainingConfig, config_loader
 from src.utils.logger import LOGGER as logger
 from src.utils.performance_metrics import PerformanceMetrics
 
@@ -61,14 +61,17 @@ class ModelPredictor:
         self.active_models: dict[str, str] = {}  # {model_key: version_id}
 
         # Configuration
-        self.predictor_config = config.model_prediction
-        self.artifacts_path = Path(config.model_training.artifacts_path)
+        self.predictor_config: ModelTrainingConfig
+        assert config.model_training is not None
+        self.predictor_config = config.model_training
+        self.artifacts_path = Path(self.predictor_config.artifacts_path)
 
         # Feature monitoring
         self.feature_stats: dict[str, dict[str, Any]] = {}
         self.prediction_history: list[PredictionResult] = []
 
         # Confidence calibration
+        assert self.predictor_config is not None
         self.confidence_threshold = self.predictor_config.confidence_threshold
         self.calibration_params: dict[str, Any] = {}
 
@@ -200,9 +203,7 @@ class ModelPredictor:
 
             if drift_detected:
                 logger.warning(f"Feature drift detected for {model_key}")
-                await self.health_monitor.record_warning(
-                    "feature_drift", {"model_key": model_key, "features": feature_vector}
-                )
+                self.health_monitor.record_warning("feature_drift", {"model_key": model_key, "features": feature_vector}) # type: ignore
 
             # Make prediction
             model = model_info["model"]
@@ -270,10 +271,10 @@ class ModelPredictor:
         """
         Efficient batch prediction for multiple instruments.
         """
-        results = []
+        results: list[Optional[PredictionResult]] = []
 
         # Group by model key for efficiency
-        grouped_requests = {}
+        grouped_requests: dict[str, list[tuple[int, str, dict[str, float]]]] = {}
         for instrument_id, timeframe, features in predictions_request:
             model_key = f"{instrument_id}_{timeframe}"
             if model_key not in grouped_requests:
@@ -317,6 +318,7 @@ class ModelPredictor:
             # Check model can predict
             test_input = np.zeros((1, model_features))
             test_prediction = model.predict(test_input)
+            assert isinstance(test_prediction, np.ndarray)
 
             if test_prediction.shape[1] != 3:  # 3 classes
                 logger.error(f"Invalid prediction shape: {test_prediction.shape}")
@@ -332,6 +334,7 @@ class ModelPredictor:
         """
         Comprehensive feature validation.
         """
+        assert self.predictor_config is not None
         expected_features = set(metadata["features"]["names"])
         provided_features = set(feature_vector.keys())
 
@@ -391,6 +394,7 @@ class ModelPredictor:
         """
         Monitors for feature drift using statistical tests.
         """
+        assert self.predictor_config is not None
         if model_key not in self.feature_stats:
             return False
 
@@ -427,7 +431,7 @@ class ModelPredictor:
         probabilities = raw_prediction[0]
 
         # Map to -1, 0, 1
-        predicted_class = np.argmax(probabilities) - 1
+        predicted_class = int(np.argmax(probabilities)) - 1
 
         # Calculate confidence (difference between top 2 probabilities)
         sorted_probs = np.sort(probabilities)[::-1]
@@ -475,6 +479,7 @@ class ModelPredictor:
         """
         Comprehensive risk assessment for the prediction.
         """
+        assert self.predictor_config is not None
         risk_factors = {}
 
         # 1. Model uncertainty
@@ -547,7 +552,7 @@ class ModelPredictor:
         # Sort by absolute contribution
         return dict(sorted(feature_contributions.items(), key=lambda x: abs(x[1]), reverse=True))
 
-    def _initialize_feature_monitoring(self, model_key: str, metadata: dict[str, Any]):
+    def _initialize_feature_monitoring(self, model_key: str, metadata: dict[str, Any]) -> None:
         """
         Initializes feature statistics for drift monitoring.
         """
@@ -562,7 +567,7 @@ class ModelPredictor:
         """
         Returns comprehensive status of all loaded models.
         """
-        status = {"active_models": {}, "model_performance": {}, "feature_drift_status": {}, "prediction_statistics": {}}
+        status: dict[str, Any] = {"active_models": {}, "model_performance": {}, "feature_drift_status": {}, "prediction_statistics": {}}
 
         # Active models
         for model_key, version_id in self.active_models.items():
@@ -583,8 +588,8 @@ class ModelPredictor:
             # Group by instrument and timeframe
             from collections import defaultdict
 
-            stats = defaultdict(
-                lambda: {"total": 0, "buy": 0, "sell": 0, "neutral": 0, "avg_confidence": 0, "avg_inference_time": 0}
+            stats: dict[str, Any] = defaultdict(
+                lambda: {"total": 0, "buy": 0, "sell": 0, "neutral": 0, "avg_confidence": 0.0, "avg_inference_time": 0.0}
             )
 
             for pred in recent:
