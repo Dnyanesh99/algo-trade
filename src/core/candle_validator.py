@@ -10,12 +10,15 @@ from typing import Any, Optional
 import pandas as pd
 from pydantic import BaseModel, Field, ValidationInfo, field_validator
 
-from src.utils.config_loader import config_loader
+from src.database.models import OHLCVData
+from src.utils.config_loader import ConfigLoader
 from src.utils.data_quality import DataQualityReport, DataValidator
 from src.utils.logger import LOGGER as logger
 
+config_loader = ConfigLoader()
+
 # Load configuration
-config = config_loader.get_config()
+config = ConfigLoader().get_config()
 
 
 class CandleData(BaseModel):
@@ -32,19 +35,15 @@ class CandleData(BaseModel):
     @field_validator("high")
     def validate_high(cls, v: float, info: ValidationInfo) -> float:
         if "low" in info.data and v < info.data["low"]:
-            raise ValueError(f'High price {v} cannot be less than low price {info.data["low"]}')
-        if "open" in info.data and "close" in info.data and v < max(info.data["open"], info.data["close"]):
-            raise ValueError(
-                f'High price {v} must be >= max(open={info.data["open"]}), close={info.data["close"]})'
-            )
+            raise ValueError(f"High price {v} cannot be less than low price {info.data['low']}")
+        if all(k in info.data for k in ["open", "close"]) and v < max(info.data["open"], info.data["close"]):
+            raise ValueError(f"High price {v} must be >= max(open={info.data['open']}), close={info.data['close']})")
         return v
 
     @field_validator("low")
     def validate_low(cls, v: float, info: ValidationInfo) -> float:
-        if "open" in info.data and "close" in info.data and v > min(info.data["open"], info.data["close"]):
-            raise ValueError(
-                f'Low price {v} must be <= min(open={info.data["open"]}), close={info.data["close"]})'
-            )
+        if all(k in info.data for k in ["open", "close"]) and v > min(info.data["open"], info.data["close"]):
+            raise ValueError(f"Low price {v} must be <= min(open={info.data['open']}), close={info.data['close']})")
         return v
 
 
@@ -105,7 +104,7 @@ class CandleValidator:
             initial_rows = len(df_work)
             issues, warnings, validation_errors = [], [], []
 
-            required_columns = ["timestamp", "open", "high", "low", "close", "volume"]
+            required_columns = self.validation_config.required_columns
             missing_columns = [col for col in required_columns if col not in df_work.columns]
             if missing_columns:
                 error_msg = f"Missing required columns: {missing_columns}"
@@ -141,10 +140,10 @@ class CandleValidator:
             # Apply validation for price columns (must be > 0) and volume (>= 0 for indices, > 0 for stocks)
             price_columns = ["open", "high", "low", "close"]
             price_valid = (df_work[price_columns] > 0).all(axis=1)
-            
+
             # For volume, allow >= 0 (to accommodate indices with 0 volume)
             volume_valid = df_work["volume"] >= 0
-            
+
             df_work = df_work[price_valid & volume_valid]
 
             ohlc_violations = 0
@@ -191,8 +190,17 @@ class CandleValidator:
                 issues.append(f"Detected {total_outliers} statistical outliers across columns.")
 
             valid_rows = len(df_work)
+            config = config_loader.get_config()
+            if not config.data_quality:
+                raise ValueError("Data quality configuration is required")
             quality_score = DataValidator.calculate_quality_score(
-                initial_rows, valid_rows, ohlc_violations, duplicate_timestamps, time_gaps, total_outliers
+                initial_rows,
+                valid_rows,
+                ohlc_violations,
+                duplicate_timestamps,
+                time_gaps,
+                total_outliers,
+                config.data_quality,
             )
 
             is_valid = (
@@ -276,7 +284,7 @@ class CandleValidator:
 
     def validate_single_candle(self, candle_data: dict[str, Any]) -> tuple[bool, list[str]]:
         try:
-            CandleData(**candle_data)
+            OHLCVData(**candle_data)
             return True, []
         except ValueError as e:
             return False, [str(e)]

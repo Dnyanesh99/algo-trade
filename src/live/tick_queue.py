@@ -1,10 +1,11 @@
 import asyncio
 from typing import Any, ClassVar, Optional
 
-from src.utils.config_loader import config_loader
+from src.metrics import metrics_registry
+from src.utils.config_loader import ConfigLoader
 from src.utils.logger import LOGGER as logger
 
-config = config_loader.get_config()
+config = ConfigLoader().get_config()
 
 
 class TickQueue:
@@ -65,6 +66,7 @@ class TickQueue:
         Retrieves a single tick from the queue. Awaits if the queue is empty.
         """
         tick = await self._queue.get()
+        metrics_registry.set_gauge("tick_queue_size", self._queue.qsize())
         logger.debug(f"Tick retrieved from queue. Current size: {self._queue.qsize()}")
         return tick
 

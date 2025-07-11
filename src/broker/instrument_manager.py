@@ -3,10 +3,8 @@ from typing import Optional
 from src.broker.rest_client import KiteRESTClient
 from src.database.instrument_repo import InstrumentRepository
 from src.database.models import InstrumentData, InstrumentRecord
-from src.utils.config_loader import config_loader
+from src.utils.config_loader import TradingConfig
 from src.utils.logger import LOGGER as logger
-
-config = config_loader.get_config()
 
 
 class InstrumentManager:
@@ -14,11 +12,14 @@ class InstrumentManager:
     Manages the synchronization of instrument data between the broker and the local database.
     """
 
-    def __init__(self, rest_client: KiteRESTClient, instrument_repo: InstrumentRepository):
+    def __init__(
+        self, rest_client: KiteRESTClient, instrument_repo: InstrumentRepository, trading_config: TradingConfig
+    ):
         self.rest_client = rest_client
         self.instrument_repo = instrument_repo
-        if config.trading:
-            self.configured_instruments = config.trading.instruments
+        self.trading_config = trading_config
+        if trading_config:
+            self.configured_instruments = trading_config.instruments
         else:
             logger.warning("Trading configuration not found. No instruments configured.")
             self.configured_instruments = []
@@ -38,7 +39,9 @@ class InstrumentManager:
         logger.info(f"Fetched {len(broker_instruments)} instruments from broker.")
 
         for broker_inst in broker_instruments:
-            logger.debug(f"Broker instrument: tradingsymbol={broker_inst.get('tradingsymbol')}, exchange={broker_inst.get('exchange')}, instrument_type={broker_inst.get('instrument_type')}")
+            logger.debug(
+                f"Broker instrument: tradingsymbol={broker_inst.get('tradingsymbol')}, exchange={broker_inst.get('exchange')}, instrument_type={broker_inst.get('instrument_type')}"
+            )
 
         for configured_inst in self.configured_instruments:
             label = configured_inst.label
@@ -82,7 +85,9 @@ class InstrumentManager:
                     )
 
                     # Check if instrument already exists in DB
-                    existing_inst: Optional[InstrumentRecord] = await self.instrument_repo.get_instrument_by_tradingsymbol(tradingsymbol, exchange)
+                    existing_inst: Optional[
+                        InstrumentRecord
+                    ] = await self.instrument_repo.get_instrument_by_tradingsymbol(tradingsymbol, exchange)
 
                     if existing_inst:
                         # Update existing instrument

@@ -1,0 +1,299 @@
+metrics:
+  enabled: true
+  endpoint_port: 8001
+  endpoint_path: "/metrics"
+  default_histogram_buckets: [0.001, 0.01, 0.1, 1.0, 5.0, 10.0]
+  definitions:
+    authentication:
+      - name: auth_requests_total
+        type: counter
+        description: "Total number of authentication requests."
+        labels: ["method", "status"]
+        dashboard_panel: "auth_requests_panel"
+      - name: auth_request_duration_seconds
+        type: histogram
+        description: "Duration of authentication requests in seconds."
+        labels: ["method"]
+        buckets: [0.01, 0.05, 0.1, 0.5, 1, 5, 10]
+        dashboard_panel: "auth_duration_panel"
+    broker_api:
+      - name: broker_api_requests_total
+        type: counter
+        description: "Total number of broker API requests."
+        labels: ["endpoint", "status"]
+        dashboard_panel: "broker_api_requests_panel"
+      - name: broker_api_duration_seconds
+        type: histogram
+        description: "Duration of broker API requests in seconds."
+        labels: ["endpoint"]
+        buckets: [0.01, 0.05, 0.1, 0.5, 1, 5, 10, 30]
+        dashboard_panel: "broker_api_duration_panel"
+    database:
+      - name: db_queries_total
+        type: counter
+        description: "Total number of database queries."
+        labels: ["operation", "table", "status"]
+        dashboard_panel: "db_queries_panel"
+      - name: db_query_duration_seconds
+        type: histogram
+        description: "Duration of database queries in seconds."
+        labels: ["operation", "table"]
+        buckets: [0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5]
+        dashboard_panel: "db_query_duration_panel"
+      - name: db_rows_processed_total
+        type: counter
+        description: "Total number of database rows processed."
+        labels: ["operation", "table"]
+        dashboard_panel: "db_rows_processed_panel"
+    feature_calculation:
+      - name: feature_calculations_total
+        type: counter
+        description: "Total number of feature calculations."
+        labels: ["instrument", "timeframe", "feature", "status"]
+        dashboard_panel: "feature_calculations_panel"
+      - name: feature_calculation_duration_seconds
+        type: histogram
+        description: "Duration of feature calculations in seconds."
+        labels: ["instrument", "timeframe", "feature"]
+        buckets: [0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5]
+        dashboard_panel: "feature_calculation_duration_panel"
+    signal_generation:
+      - name: signals_generated_total
+        type: counter
+        description: "Total number of signals generated."
+        labels: ["instrument", "signal_type", "timeframe"]
+        dashboard_panel: "signals_generated_panel"
+      - name: signal_confidence_score
+        type: histogram
+        description: "Confidence score of generated signals."
+        labels: ["instrument", "signal_type"]
+        buckets: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+        dashboard_panel: "signal_confidence_panel"
+    model_training:
+      - name: model_training_duration_seconds
+        type: histogram
+        description: "Duration of model training in seconds."
+        labels: ["instrument", "timeframe", "model_type", "success"]
+        buckets: [0.1, 0.5, 1, 5, 10, 30, 60, 120, 300, 600]
+        dashboard_panel: "model_training_duration_panel"
+      - name: model_training_total
+        type: counter
+        description: "Total number of model training attempts."
+        labels: ["instrument", "timeframe", "model_type", "success"]
+        dashboard_panel: "model_training_total_panel"
+    model_prediction:
+      - name: model_prediction_duration_seconds
+        type: histogram
+        description: "Duration of model prediction in seconds."
+        labels: ["instrument", "timeframe", "model_type"]
+        buckets: [0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1]
+        dashboard_panel: "model_prediction_duration_panel"
+      - name: model_prediction_total
+        type: counter
+        description: "Total number of model predictions."
+        labels: ["instrument", "timeframe", "model_type", "prediction_label", "status"]
+        dashboard_panel: "model_prediction_total_panel"
+      - name: model_prediction_errors_total
+        type: counter
+        description: "Total number of model prediction errors."
+        labels: ["instrument", "timeframe", "model_type", "error_type"]
+        dashboard_panel: "model_prediction_errors_panel"
+      - name: model_loading_duration_seconds
+        type: histogram
+        description: "Duration of model loading in seconds."
+        labels: []
+        buckets: [0.1, 0.5, 1, 5, 10, 30, 60]
+        dashboard_panel: "model_loading_duration_panel"
+      - name: model_loading_total
+        type: counter
+        description: "Total number of model loading attempts."
+        labels: ["status"]
+        dashboard_panel: "model_loading_total_panel"
+      - name: model_prediction_confidence_distribution
+        type: histogram
+        description: "Distribution of prediction confidence scores."
+        labels: ["instrument", "timeframe", "prediction_label"]
+        buckets: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+        dashboard_panel: "model_confidence_distribution_panel"
+      - name: model_accuracy_real_time
+        type: gauge
+        description: "Real-time model accuracy over sliding window."
+        labels: ["instrument", "timeframe", "window_size"]
+        dashboard_panel: "model_accuracy_panel"
+      - name: prediction_bias_score
+        type: gauge
+        description: "Prediction bias towards buy/sell/neutral signals."
+        labels: ["instrument", "timeframe", "bias_type"]
+        dashboard_panel: "prediction_bias_panel"
+      - name: model_performance_metrics
+        type: gauge
+        description: "Model performance metrics (precision, recall, f1)."
+        labels: ["instrument", "timeframe", "metric_type", "class_label"]
+        dashboard_panel: "model_performance_panel"
+    system_health:
+      - name: system_health_score
+        type: gauge
+        description: "System health score (0-1) for each component."
+        labels: ["component"]
+        dashboard_panel: "system_health_panel"
+      - name: memory_usage_bytes
+        type: gauge
+        description: "Memory usage in bytes for each component."
+        labels: ["component"]
+        dashboard_panel: "memory_usage_panel"
+      - name: data_freshness_seconds
+        type: gauge
+        description: "Age of data in seconds for each instrument and timeframe."
+        labels: ["instrument", "timeframe"]
+        dashboard_panel: "data_freshness_panel"
+      - name: websocket_connections_active
+        type: gauge
+        description: "Number of active WebSocket connections."
+        labels: []
+        dashboard_panel: "websocket_connections_panel"
+    feature_monitoring:
+      - name: feature_drift_z_score
+        type: gauge
+        description: "Z-score indicating feature distribution drift."
+        labels: ["instrument", "timeframe", "feature_name"]
+        dashboard_panel: "feature_drift_panel"
+      - name: feature_drift_alerts_total
+        type: counter
+        description: "Total feature drift alerts triggered."
+        labels: ["instrument", "timeframe", "feature_name", "severity"]
+        dashboard_panel: "feature_drift_alerts_panel"
+      - name: data_quality_score
+        type: gauge
+        description: "Overall data quality score for features."
+        labels: ["instrument", "timeframe"]
+        dashboard_panel: "data_quality_panel"
+      - name: feature_importance_shift
+        type: gauge
+        description: "Change in feature importance compared to training."
+        labels: ["instrument", "timeframe", "feature_name"]
+        dashboard_panel: "feature_importance_shift_panel"
+    trading_performance:
+      - name: signal_effectiveness_ratio
+        type: gauge
+        description: "Ratio of profitable to total signals."
+        labels: ["instrument", "signal_type", "timeframe"]
+        dashboard_panel: "signal_effectiveness_panel"
+      - name: signal_pnl_attribution
+        type: histogram
+        description: "PnL distribution attributed to model signals."
+        labels: ["instrument", "signal_type"]
+        buckets: [-1000, -500, -100, -50, -10, 0, 10, 50, 100, 500, 1000]
+        dashboard_panel: "signal_pnl_panel"
+      - name: signal_timing_latency
+        type: histogram
+        description: "Latency between signal generation and market action."
+        labels: ["instrument", "signal_type"]
+        buckets: [0.01, 0.05, 0.1, 0.5, 1, 5, 10, 30]
+        dashboard_panel: "signal_timing_panel"
+      - name: model_prediction_accuracy_window
+        type: gauge
+        description: "Model prediction accuracy over rolling window."
+        labels: ["instrument", "timeframe", "window_hours"]
+        dashboard_panel: "prediction_accuracy_window_panel"
+    feature_engineering:
+      - name: features_generated_total
+        type: counter
+        description: "Total number of engineered features generated."
+        labels: ["instrument", "timeframe", "pattern", "status"]
+        dashboard_panel: "features_generated_panel"
+      - name: feature_generation_duration_seconds
+        type: histogram
+        description: "Duration of feature generation in seconds."
+        labels: ["instrument", "timeframe", "pattern"]
+        buckets: [0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5]
+        dashboard_panel: "feature_generation_duration_panel"
+      - name: feature_selection_changes_total
+        type: counter
+        description: "Total number of feature selection updates."
+        labels: ["instrument", "timeframe", "change_type"]
+        dashboard_panel: "feature_selection_changes_panel"
+      - name: selected_features_count
+        type: gauge
+        description: "Current number of selected features per instrument."
+        labels: ["instrument", "timeframe"]
+        dashboard_panel: "selected_features_count_panel"
+      - name: feature_importance_distribution
+        type: histogram
+        description: "Distribution of feature importance scores."
+        labels: ["instrument", "timeframe"]
+        buckets: [0.0, 0.001, 0.005, 0.01, 0.05, 0.1, 0.2, 0.5, 1.0]
+        dashboard_panel: "feature_importance_distribution_panel"
+      - name: cross_asset_correlation_score
+        type: gauge
+        description: "Cross-asset correlation strength."
+        labels: ["primary_instrument", "related_instrument", "timeframe"]
+        dashboard_panel: "cross_asset_correlation_panel"
+      - name: feature_lineage_depth
+        type: gauge
+        description: "Depth of feature dependency chains."
+        labels: ["feature_type"]
+        dashboard_panel: "feature_lineage_panel"
+    error_handling:
+      - name: error_recovery_attempts_total
+        type: counter
+        description: "Total number of error recovery attempts."
+        labels: ["component", "error_type"]
+        dashboard_panel: "error_recovery_panel"
+  dashboard:
+    title: "Algo Trading System Metrics"
+    refresh_interval: "5s"
+    time_range: "6h"
+    panels:
+      # Authentication metrics
+      - name: "auth_requests_panel"
+        position: {x: 0, y: 0, w: 12, h: 8}
+      - name: "auth_duration_panel"
+        position: {x: 12, y: 0, w: 12, h: 8}
+      # Broker API metrics
+      - name: "broker_api_requests_panel"
+        position: {x: 0, y: 8, w: 12, h: 8}
+      - name: "broker_api_duration_panel"
+        position: {x: 12, y: 8, w: 12, h: 8}
+      # Database metrics
+      - name: "db_queries_panel"
+        position: {x: 0, y: 16, w: 8, h: 8}
+      - name: "db_query_duration_panel"
+        position: {x: 8, y: 16, w: 8, h: 8}
+      - name: "db_rows_processed_panel"
+        position: {x: 16, y: 16, w: 8, h: 8}
+      # Feature calculation metrics
+      - name: "feature_calculations_panel"
+        position: {x: 0, y: 24, w: 12, h: 8}
+      - name: "feature_calculation_duration_panel"
+        position: {x: 12, y: 24, w: 12, h: 8}
+      # Signal generation metrics
+      - name: "signals_generated_panel"
+        position: {x: 0, y: 32, w: 12, h: 8}
+      - name: "signal_confidence_panel"
+        position: {x: 12, y: 32, w: 12, h: 8}
+      # Model training metrics
+      - name: "model_training_duration_panel"
+        position: {x: 0, y: 40, w: 12, h: 8}
+      - name: "model_training_total_panel"
+        position: {x: 12, y: 40, w: 12, h: 8}
+      # Model prediction metrics
+      - name: "model_prediction_duration_panel"
+        position: {x: 0, y: 48, w: 8, h: 8}
+      - name: "model_prediction_total_panel"
+        position: {x: 8, y: 48, w: 8, h: 8}
+      - name: "model_prediction_errors_panel"
+        position: {x: 16, y: 48, w: 8, h: 8}
+      - name: "model_predictions_panel"
+        position: {x: 0, y: 56, w: 24, h: 8}
+      # System health metrics
+      - name: "system_health_panel"
+        position: {x: 0, y: 64, w: 6, h: 8}
+      - name: "memory_usage_panel"
+        position: {x: 6, y: 64, w: 6, h: 8}
+      - name: "data_freshness_panel"
+        position: {x: 12, y: 64, w: 6, h: 8}
+      - name: "websocket_connections_panel"
+        position: {x: 18, y: 64, w: 6, h: 8}
+      # Error handling metrics
+      - name: "error_recovery_panel"
+        position: {x: 0, y: 72, w: 24, h: 8}

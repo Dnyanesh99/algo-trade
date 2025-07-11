@@ -4,7 +4,7 @@ from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime
 from enum import IntEnum
-from typing import Any, Optional, Tuple
+from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
@@ -14,10 +14,10 @@ from numpy.typing import NDArray
 
 from src.database.label_repo import LabelRepository
 from src.database.models import LabelData
-from src.utils.config_loader import config_loader
+from src.utils.config_loader import ConfigLoader
 from src.utils.logger import LOGGER as logger
 
-config = config_loader.get_config()
+config = ConfigLoader().get_config()
 
 
 class ExitReason(IntEnum):
@@ -46,31 +46,6 @@ class BarrierConfig:
     epsilon: float
     use_dynamic_barriers: bool
     volatility_lookback: int
-
-    def __post_init__(self) -> None:
-        assert config.trading is not None and config.trading.labeling is not None
-        # This is a bit of a hack to work around the dataclass being frozen
-        object.__setattr__(self, "atr_period", self.atr_period or config.trading.labeling.atr_period)
-        object.__setattr__(
-            self, "tp_atr_multiplier", self.tp_atr_multiplier or config.trading.labeling.tp_atr_multiplier
-        )
-        object.__setattr__(
-            self, "sl_atr_multiplier", self.sl_atr_multiplier or config.trading.labeling.sl_atr_multiplier
-        )
-        object.__setattr__(
-            self, "max_holding_periods", self.max_holding_periods or config.trading.labeling.max_holding_periods
-        )
-        object.__setattr__(
-            self, "min_bars_required", self.min_bars_required or config.trading.labeling.min_bars_required
-        )
-        object.__setattr__(self, "atr_smoothing", self.atr_smoothing or config.trading.labeling.atr_smoothing)
-        object.__setattr__(self, "epsilon", self.epsilon or config.trading.labeling.epsilon)
-        object.__setattr__(
-            self, "use_dynamic_barriers", self.use_dynamic_barriers or config.trading.labeling.use_dynamic_barriers
-        )
-        object.__setattr__(
-            self, "volatility_lookback", self.volatility_lookback or config.trading.labeling.volatility_lookback
-        )
 
 
 @dataclass
@@ -122,7 +97,9 @@ class OptimizedTripleBarrierLabeler:
 
     @staticmethod
     @jit(nopython=True, cache=True, fastmath=True)  # type: ignore[misc]
-    def _calculate_true_range(high: NDArray[np.float64], low: NDArray[np.float64], close: NDArray[np.float64]) -> NDArray[np.float64]:
+    def _calculate_true_range(
+        high: NDArray[np.float64], low: NDArray[np.float64], close: NDArray[np.float64]
+    ) -> NDArray[np.float64]:
         """Calculate True Range with proper handling of the first bar."""
         n = len(high)
         if n == 0:
@@ -139,6 +116,26 @@ class OptimizedTripleBarrierLabeler:
 
         return tr
 
+    @staticmethod
+    @jit(nopython=True, cache=True, fastmath=True)  # type: ignore[misc]
+    def _calculate_ema(values: NDArray[np.float64], period: int) -> NDArray[np.float64]:
+        """Exponential moving average calculation."""
+        n = len(values)
+        if n < period:
+            return np.full(n, np.nan, dtype=np.float64)
+
+        ema = np.empty(n, dtype=np.float64)
+        ema[: period - 1] = np.nan  # Fill initial NaNs if period > 1
+
+        # Initialize with SMA for the first 'period' values
+        ema[period - 1] = np.mean(values[:period])
+
+        alpha = 2.0 / (period + 1)
+        for i in range(period, n):
+            ema[i] = alpha * values[i] + (1 - alpha) * ema[i - 1]
+
+        return ema
+
     def _calculate_atr(self, df: pd.DataFrame, symbol: str) -> NDArray[np.float64]:
         """Calculate ATR with a symbol-specific cache for performance."""
         # --- SUGGESTION IMPLEMENTED: More specific cache key ---
@@ -151,7 +148,7 @@ class OptimizedTripleBarrierLabeler:
         tr = self._calculate_true_range(df["high"].values, df["low"].values, df["close"].values)
 
         if self.config.atr_smoothing == "ema":
-            atr = pd.Series(tr).ewm(span=self.config.atr_period, adjust=False).mean().values
+            atr = self._calculate_ema(tr, self.config.atr_period)
         else:
             atr = pd.Series(tr).rolling(window=self.config.atr_period).mean().values
 
@@ -196,7 +193,14 @@ class OptimizedTripleBarrierLabeler:
         sl_prices: NDArray[np.float64],
         max_periods: int,
         epsilon: float,
-    ) -> Tuple[NDArray[np.int8], NDArray[np.int32], NDArray[np.float64], NDArray[np.int8], NDArray[np.float64], NDArray[np.float64]]:
+    ) -> tuple[
+        NDArray[np.int8],
+        NDArray[np.int32],
+        NDArray[np.float64],
+        NDArray[np.int8],
+        NDArray[np.float64],
+        NDArray[np.float64],
+    ]:
         """Optimized barrier checking with parallel processing."""
         n = len(entry_prices)
         labels = np.zeros(n, dtype=np.int8)
@@ -281,14 +285,14 @@ class OptimizedTripleBarrierLabeler:
         else:
             # If no timestamp column found, use the index
             timestamp_col = df.index
-        
+
         # Ensure timestamp_col is a pandas Series or Index with proper length
         if not isinstance(timestamp_col, (pd.Series, pd.Index)):
             timestamp_col = pd.Series(timestamp_col, index=df.index)
         elif len(timestamp_col) != len(df):
             # If lengths don't match, use the index
             timestamp_col = df.index
-        
+
         result_df = pd.DataFrame(
             {
                 "ts": timestamp_col,
@@ -450,4 +454,3 @@ class OptimizedTripleBarrierLabeler:
         """--- SUGGESTION IMPLEMENTED: Gracefully shuts down the process pool executor. ---"""
         logger.info("Shutting down the ProcessPoolExecutor.")
         self.executor.shutdown(wait=True)
-

@@ -2,15 +2,15 @@ import asyncio
 from datetime import datetime, timedelta
 from typing import Any, Optional
 
+import psutil
 import pytz
 
 from src.broker.websocket_client import KiteWebSocketClient
 from src.database.db_utils import DatabaseManager
+from src.metrics import metrics_registry
 from src.state.system_state import SystemState
-from src.utils.config_loader import config_loader
+from src.utils.config_loader import HealthMonitorConfig, SystemConfig
 from src.utils.logger import LOGGER as logger
-
-config = config_loader.get_config()
 
 
 class HealthMonitor:
@@ -24,15 +24,17 @@ class HealthMonitor:
         system_state: SystemState,
         ws_client: Optional[KiteWebSocketClient],
         db_manager: DatabaseManager,
+        health_monitor_config: HealthMonitorConfig,
+        system_config: SystemConfig,
     ):
-        assert config.health_monitor is not None
         self.system_state = system_state
         self.ws_client = ws_client
         self.db_manager = db_manager
         self._monitor_task: Optional[asyncio.Task] = None
         self._last_data_timestamp: dict[int, datetime] = {}
-        self._monitor_interval = config.health_monitor.monitor_interval
-        self.data_freshness_threshold = timedelta(minutes=config.health_monitor.data_freshness_threshold_minutes)
+        self._monitor_interval = health_monitor_config.monitor_interval
+        self.data_freshness_threshold = timedelta(minutes=health_monitor_config.data_freshness_threshold_minutes)
+        self.system_timezone = system_config.timezone
 
     def update_last_data_timestamp(self, instrument_token: int, timestamp: datetime) -> None:
         """
@@ -75,8 +77,7 @@ class HealthMonitor:
         """
         Checks the freshness of the last received data for all tracked instruments.
         """
-        assert config.system is not None
-        current_time = datetime.now(pytz.timezone(config.system.timezone))
+        current_time = datetime.now(pytz.timezone(self.system_timezone))
 
         for instrument_token, last_ts in self._last_data_timestamp.items():
             if current_time - last_ts > self.data_freshness_threshold:
@@ -93,11 +94,20 @@ class HealthMonitor:
         """
         Main monitoring loop.
         """
+        process = psutil.Process()
         while True:
-            logger.debug("Running health checks...")
-            await self._check_websocket_health()
-            await self._check_database_health()
-            await self._check_data_freshness()
+            try:
+                logger.debug("Running health checks...")
+                metrics_registry.set_gauge("memory_usage_bytes", process.memory_info().rss, {"component": "system"})
+                await self._check_websocket_health()
+                await self._check_database_health()
+                await self._check_data_freshness()
+            except asyncio.CancelledError:
+                logger.info("Health monitoring loop cancelled.")
+                break
+            except Exception as e:
+                logger.error(f"Unhandled exception in health monitoring loop: {e}", exc_info=True)
+
             await asyncio.sleep(self._monitor_interval)
 
     def start_monitoring(self) -> None:
@@ -132,6 +142,5 @@ class HealthMonitor:
         logger.debug(f"Successful operation recorded: {operation_name}")
         # Update system state with successful operation
         self.system_state.update_component_health(
-            operation_name,
-            {"status": "success", "timestamp": datetime.now(), **kwargs}
+            operation_name, {"status": "success", "timestamp": datetime.now(), **kwargs}
         )

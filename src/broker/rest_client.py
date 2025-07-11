@@ -1,16 +1,15 @@
 import asyncio
+import time
 from typing import Any, Optional
 
 from kiteconnect import KiteConnect
 from kiteconnect.exceptions import KiteException, NetworkException, TokenException
 
 from src.auth.token_manager import TokenManager
-from src.utils.config_loader import config_loader
-from src.utils.logger import LOGGER as logger  # Centralized logger
-from src.utils.rate_limiter import RateLimiter
-
-# Load configuration
-config = config_loader.get_config()
+from src.metrics import metrics_registry
+from src.utils.config_loader import AppConfig
+from src.utils.logger import LOGGER as logger
+from src.utils.rate_limiter import RateLimiter, get_rate_limiter
 
 
 class KiteRESTClient:
@@ -19,12 +18,20 @@ class KiteRESTClient:
     Ensures requests are signed and rate-limited.
     """
 
-    def __init__(self) -> None:
-        self.api_key = config.broker.api_key if config.broker and config.broker.api_key else ""
-        self.token_manager = TokenManager()
+    def __init__(self, token_manager: TokenManager, api_key: str) -> None:
+        self.api_key = api_key
+        self.token_manager = token_manager
+        self.kite: Optional[KiteConnect] = None
+        self.historical_data_rate_limiter: Optional[RateLimiter] = None
+        self.general_api_rate_limiter: Optional[RateLimiter] = None
+
+    async def initialize(self, config: Optional[AppConfig] = None) -> None:
+        """
+        Initializes the KiteRESTClient, including the KiteConnect client and rate limiters.
+        """
         self.kite = self._initialize_kite_client()
-        self.historical_data_rate_limiter = RateLimiter("historical_data")
-        self.general_api_rate_limiter = RateLimiter("general_api")
+        self.historical_data_rate_limiter = await get_rate_limiter("historical_data", config)
+        self.general_api_rate_limiter = await get_rate_limiter("general_api", config)
 
     def _initialize_kite_client(self) -> KiteConnect:
         """
@@ -44,6 +51,8 @@ class KiteRESTClient:
         Updates the access token for the KiteConnect client if it has changed.
         This is crucial for long-running applications where the token might be refreshed.
         """
+        if not self.kite:
+            raise RuntimeError("KiteRESTClient not initialized. Call initialize() first.")
         current_token = self.token_manager.get_access_token()
         if current_token and self.kite.access_token != current_token:
             self.kite.set_access_token(current_token)
@@ -60,27 +69,24 @@ class KiteRESTClient:
         """
         Fetches historical OHLCV data for a given instrument.
         Applies rate limiting before making the API call.
-
-        Args:
-            instrument_token (int): Instrument token of the instrument.
-            from_date (str): Start date (yyyy-mm-dd).
-            to_date (str): End date (yyyy-mm-dd).
-            interval (str): Candle interval (e.g., "minute", "5minute", "15minute", "day").
-            continuous (bool, optional): Whether to fetch continuous data for futures. Defaults to False.
-
-        Returns:
-            Optional[list[Dict[str, Any]]]: List of historical data candles, or None if an error occurs.
         """
+        if not self.kite or not self.historical_data_rate_limiter:
+            raise RuntimeError("KiteRESTClient not initialized. Call initialize() first.")
+
         self._update_access_token()
+        start_time = time.monotonic()
         try:
             async with self.historical_data_rate_limiter:
                 logger.info(
                     f"Fetching historical data for {instrument_token} from {from_date} to {to_date} ({interval} interval)"
                 )
                 loop = asyncio.get_running_loop()
-                return await loop.run_in_executor(
+                if self.kite is None:
+                    raise RuntimeError("Kite client is not initialized.")
+                kite = self.kite  # Assign to local variable for lambda
+                result: Optional[list[dict[str, Any]]] = await loop.run_in_executor(
                     None,
-                    lambda: self.kite.historical_data(
+                    lambda: kite.historical_data(
                         instrument_token,
                         from_date,
                         to_date,
@@ -88,17 +94,20 @@ class KiteRESTClient:
                         continuous=continuous,
                     ),
                 )
-        except TokenException as e:
-            logger.error(f"Authentication token error fetching historical data for {instrument_token}: {e}")
-            # Consider triggering re-authentication flow or critical alert
-            return None
-        except NetworkException as e:
-            logger.error(f"Network error fetching historical data for {instrument_token}: {e}")
-            return None
-        except KiteException as e:
-            logger.error(f"KiteConnect API error fetching historical data for {instrument_token}: {e}")
+
+                duration = time.monotonic() - start_time
+                metrics_registry.record_broker_api_request("historical_data", True, duration)
+
+                return result
+
+        except (TokenException, NetworkException, KiteException) as e:
+            duration = time.monotonic() - start_time
+            metrics_registry.record_broker_api_request("historical_data", False, duration)
+            logger.error(f"Error fetching historical data for {instrument_token}: {e}")
             return None
         except Exception as e:
+            duration = time.monotonic() - start_time
+            metrics_registry.record_broker_api_request("historical_data", False, duration)
             logger.error(f"Unexpected error fetching historical data for {instrument_token}: {e}")
             return None
 
@@ -106,22 +115,24 @@ class KiteRESTClient:
         """
         Fetches the list of instruments.
         Applies rate limiting before making the API call.
-
-        Args:
-            exchange (str, optional): Exchange name (e.g., "NSE", "BSE"). Defaults to None (all instruments).
-
-        Returns:
-            Optional[list[Dict[str, Any]]]: List of instrument details, or None if an error occurs.
         """
+        if not self.kite or not self.general_api_rate_limiter:
+            raise RuntimeError("KiteRESTClient not initialized. Call initialize() first.")
+
         self._update_access_token()
         try:
-            async with self.general_api_rate_limiter:  # Using general API limiter for instruments
+            async with self.general_api_rate_limiter:
                 logger.info(f"Fetching instruments for exchange: {exchange if exchange else 'All'}")
                 loop = asyncio.get_running_loop()
-                return await loop.run_in_executor(None, lambda: self.kite.instruments(exchange=exchange))
+                if self.kite is None:
+                    raise RuntimeError("Kite client is not initialized.")
+                kite = self.kite  # Assign to local variable for lambda
+                result: Optional[list[dict[str, Any]]] = await loop.run_in_executor(
+                    None, lambda: kite.instruments(exchange=exchange)
+                )
+                return result
         except TokenException as e:
             logger.error(f"Authentication token error fetching instruments: {e}")
-            # Consider triggering re-authentication flow or critical alert
             return None
         except NetworkException as e:
             logger.error(f"Network error fetching instruments: {e}")
@@ -132,6 +143,3 @@ class KiteRESTClient:
         except Exception as e:
             logger.error(f"Unexpected error fetching instruments: {e}")
             return None
-
-    # Add other REST API methods as needed (e.g., get_quotes, place_order, etc.)
-    # Remember to apply appropriate rate limiting for each endpoint.

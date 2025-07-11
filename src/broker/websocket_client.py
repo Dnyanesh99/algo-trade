@@ -5,11 +5,8 @@ from typing import Any, Callable, Optional
 from kiteconnect import KiteTicker
 
 from src.auth.token_manager import TokenManager
-from src.utils.config_loader import config_loader
+from src.utils.config_loader import BrokerConfig
 from src.utils.logger import LOGGER as logger  # Centralized logger
-
-# Load configuration
-config = config_loader.get_config()
 
 
 class KiteWebSocketClient:
@@ -20,11 +17,13 @@ class KiteWebSocketClient:
 
     def __init__(
         self,
+        broker_config: BrokerConfig,
         on_ticks_callback: Callable[[list[dict[str, Any]]], None],
         on_reconnect_callback: Callable[[int], Any],
         on_noreconnect_callback: Callable[[], Any],
     ):
-        self.api_key = config.broker.api_key if config.broker and config.broker.api_key else ""
+        self.broker_config = broker_config
+        self.api_key = broker_config.api_key
         self.token_manager = TokenManager()
         self.kws: Optional[KiteTicker] = None
         self.on_ticks_callback = on_ticks_callback
@@ -144,7 +143,9 @@ class KiteWebSocketClient:
                 "QUOTE": self.kws.MODE_QUOTE,
                 "LTP": self.kws.MODE_LTP,
             }
-            selected_mode = mode_map.get(config.broker.websocket_mode.upper() if config.broker and config.broker.websocket_mode else "FULL")
+            selected_mode = mode_map.get(
+                self.broker_config.websocket_mode.upper() if self.broker_config.websocket_mode else "FULL"
+            )
             self.kws.set_mode(selected_mode, instrument_tokens)
         else:
             logger.warning("Cannot subscribe: Kite WebSocket not connected.")

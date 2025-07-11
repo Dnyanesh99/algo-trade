@@ -10,13 +10,10 @@ from typing import TYPE_CHECKING, Optional
 
 from loguru import logger
 
-from src.utils.config_loader import config_loader
-
 if TYPE_CHECKING:
     from types import FrameType
 
-# Load configuration
-config = config_loader.get_config()
+    from src.utils.config_loader import LoggingConfig
 
 
 class LoggerSetup:
@@ -25,7 +22,7 @@ class LoggerSetup:
     _initialized: bool = False
 
     @classmethod
-    def setup_logger(cls) -> None:
+    def setup_logger(cls, logging_config: "LoggingConfig") -> None:
         """Setup logger with configuration-driven settings."""
         if cls._initialized:
             return
@@ -34,23 +31,25 @@ class LoggerSetup:
         logger.remove()
 
         # Ensure log directory exists
-        if config.logging:
-            log_file_path = Path(config.logging.file)
+        if logging_config:
+            log_file_path = Path(logging_config.file)
             log_file_path.parent.mkdir(parents=True, exist_ok=True)
 
             # Add file logging with comprehensive settings
             # For production, consider serialize=True for structured JSON logs
             # which are easier for log aggregation systems (e.g., ELK, Splunk).
+            # For production, backtrace and diagnose should be False to avoid leaking sensitive data.
+            # These could be enabled in a development environment via environment variables.
             logger.add(
-                config.logging.file,
-                level=config.logging.level,
-                format=config.logging.format,
-                rotation=config.logging.rotation,
-                compression=config.logging.compression,
-                retention=config.logging.retention,
+                logging_config.file,
+                level=logging_config.level,
+                format=logging_config.format,
+                rotation=logging_config.rotation,
+                compression=logging_config.compression,
+                retention=logging_config.retention,
                 enqueue=True,
-                backtrace=True,
-                diagnose=True,
+                backtrace=False,
+                diagnose=False,
                 catch=True,
                 serialize=False,  # Changed to False for readable logs
             )
@@ -58,8 +57,8 @@ class LoggerSetup:
             # Add console logging for development/debugging
             logger.add(
                 sys.stderr,
-                level=config.logging.level,
-                format=config.logging.format,
+                level=logging_config.level,
+                format=logging_config.format,
                 colorize=True,
                 enqueue=True,
                 backtrace=False,
@@ -79,17 +78,21 @@ class LoggerSetup:
                     level = str(record.levelno)
 
                 # Find caller from where record originated
-                frame: Optional[FrameType] = sys._getframe(6)
-                depth: int = 6
-                while frame and frame.f_code.co_filename == logging.__file__:
-                    frame = frame.f_back
+                # Start with depth=1 and walk up the stack to find the actual caller
+                depth: int = 1
+                frame: Optional[FrameType] = sys._getframe(depth)
+                while frame and (frame.f_code.co_filename == logging.__file__ or frame.f_code.co_filename == __file__):
                     depth += 1
+                    try:
+                        frame = sys._getframe(depth)
+                    except ValueError:
+                        break
 
                 logger.opt(depth=depth, exception=record.exc_info).log(level, record.getMessage())
 
         # Replace standard logging
-        if config.logging:
-            logging.basicConfig(handlers=[InterceptHandler()], level=getattr(logging, config.logging.level), force=True)
+        if logging_config:
+            logging.basicConfig(handlers=[InterceptHandler()], level=getattr(logging, logging_config.level), force=True)
         else:
             logging.basicConfig(handlers=[InterceptHandler()], level=logging.INFO, force=True)
 
@@ -102,8 +105,6 @@ class LoggerSetup:
         logger.info("Centralized logging initialized successfully")
 
 
-# Initialize logger on module import
-LoggerSetup.setup_logger()
-
-# Export the configured logger instance
+# Export the logger instance (initialize in main application)
 LOGGER = logger
+# Hot reload test comment

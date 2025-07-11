@@ -1,0 +1,103 @@
+pg_database:
+  query: "SELECT d.datname AS datname, CASE WHEN pg_catalog.has_database_privilege(d.datname, 'CONNECT') THEN pg_catalog.pg_database_size(d.datname) ELSE 0 END AS size_bytes FROM pg_catalog.pg_database d WHERE d.datistemplate = false"
+  metrics:
+    - datname:
+        usage: "LABEL"
+        description: "Name of the database"
+    - size_bytes:
+        usage: "GAUGE"
+        description: "Size of the database in bytes"
+
+pg_stat_database:
+  query: "SELECT datname, numbackends, xact_commit, xact_rollback, blks_read, blks_hit, tup_returned, tup_fetched, tup_inserted, tup_updated, tup_deleted, conflicts, temp_files, temp_bytes, deadlocks, blk_read_time, blk_write_time, stats_reset FROM pg_stat_database"
+  metrics:
+    - datname:
+        usage: "LABEL"
+        description: "Name of the database"
+    - numbackends:
+        usage: "GAUGE"
+        description: "Number of backends currently connected to this database"
+    - xact_commit:
+        usage: "COUNTER"
+        description: "Number of transactions in this database that have been committed"
+    - xact_rollback:
+        usage: "COUNTER"
+        description: "Number of transactions in this database that have been rolled back"
+    - blks_read:
+        usage: "COUNTER"
+        description: "Number of disk blocks read in this database"
+    - blks_hit:
+        usage: "COUNTER"
+        description: "Number of times disk blocks were found already in the buffer cache"
+    - tup_returned:
+        usage: "COUNTER"
+        description: "Number of rows returned by queries in this database"
+    - tup_fetched:
+        usage: "COUNTER"
+        description: "Number of live rows fetched by sequential scans in this database"
+    - tup_inserted:
+        usage: "COUNTER"
+        description: "Number of rows inserted by transactions in this database"
+    - tup_updated:
+        usage: "COUNTER"
+        description: "Number of rows updated by transactions in this database"
+    - tup_deleted:
+        usage: "COUNTER"
+        description: "Number of rows deleted by transactions in this database"
+    - conflicts:
+        usage: "COUNTER"
+        description: "Number of queries canceled due to conflicts with recovery in this database"
+    - temp_files:
+        usage: "COUNTER"
+        description: "Number of temporary files created by queries in this database"
+    - temp_bytes:
+        usage: "COUNTER"
+        description: "Total amount of data written to temporary files by queries in this database"
+    - deadlocks:
+        usage: "COUNTER"
+        description: "Number of deadlocks detected in this database"
+    - blk_read_time:
+        usage: "COUNTER"
+        description: "Time spent reading data file blocks by backends in this database, in milliseconds"
+    - blk_write_time:
+        usage: "COUNTER"
+        description: "Time spent writing data file blocks by backends in this database, in milliseconds"
+    - stats_reset:
+        usage: "GAUGE"
+        description: "Time at which database statistics were last reset"
+
+# TimescaleDB specific metrics
+timescaledb_hypertable_stats:
+  query: "SELECT hypertable_schema, hypertable_name, num_chunks, compression_enabled FROM timescaledb_information.hypertables"
+  metrics:
+    - hypertable_schema:
+        usage: "LABEL"
+        description: "Schema name of the hypertable"
+    - hypertable_name:
+        usage: "LABEL"
+        description: "Table name of the hypertable"
+    - num_chunks:
+        usage: "GAUGE"
+        description: "Number of chunks for the hypertable"
+    - compression_enabled:
+        usage: "GAUGE"
+        description: "1 if compression is enabled, 0 otherwise"
+
+timescaledb_chunk_stats:
+  query: "SELECT hypertable_schema, hypertable_name, chunk_schema, chunk_name, is_compressed FROM timescaledb_information.chunks"
+  metrics:
+    - hypertable_schema:
+        usage: "LABEL"
+        description: "Schema name of the hypertable"
+    - hypertable_name:
+        usage: "LABEL"
+        description: "Table name of the hypertable"
+    - chunk_schema:
+        usage: "LABEL"
+        description: "Schema name of the chunk"
+    - chunk_name:
+        usage: "LABEL"
+        description: "Name of the chunk"
+    - is_compressed:
+        usage: "GAUGE"
+        description: "1 if the chunk is compressed, 0 otherwise"

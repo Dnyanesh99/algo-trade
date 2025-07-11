@@ -9,11 +9,9 @@ from typing import Optional
 
 import pytz
 
-from src.utils.config_loader import config_loader
+from src.utils.config_loader import SystemConfig, TimeSynchronizerConfig
 from src.utils.logger import LOGGER as logger
-
-# Load configuration
-config = config_loader.get_config()
+from src.utils.time_helper import get_next_candle_boundary
 
 
 class TimeSynchronizer:
@@ -27,24 +25,17 @@ class TimeSynchronizer:
     - Production-grade error handling
     """
 
-    def __init__(self) -> None:
-        if config.time_synchronizer:
-            self.candle_interval_minutes = config.time_synchronizer.candle_interval_minutes
-            self.latency_buffer_seconds = config.time_synchronizer.latency_buffer_seconds
-            self.max_sync_attempts = config.time_synchronizer.max_sync_attempts
-            self.sync_tolerance_seconds = config.time_synchronizer.sync_tolerance_seconds
-        else:
-            logger.warning("Time synchronizer configuration not found. Using default values.")
-            self.candle_interval_minutes = 15  # Default
-            self.latency_buffer_seconds = 2    # Default
-            self.max_sync_attempts = 3         # Default
-            self.sync_tolerance_seconds = 2.0  # Default
+    def __init__(self, time_synchronizer_config: TimeSynchronizerConfig, system_config: SystemConfig) -> None:
+        if not time_synchronizer_config:
+            raise ValueError("Time synchronizer configuration is required")
+        if not system_config:
+            raise ValueError("System configuration is required")
 
-        if config.system:
-            self.timezone = config.system.timezone
-        else:
-            logger.warning("System configuration not found. Using default timezone 'Asia/Kolkata'.")
-            self.timezone = "Asia/Kolkata"
+        self.candle_interval_minutes = time_synchronizer_config.candle_interval_minutes
+        self.latency_buffer_seconds = time_synchronizer_config.latency_buffer_seconds
+        self.max_sync_attempts = time_synchronizer_config.max_sync_attempts
+        self.sync_tolerance_seconds = time_synchronizer_config.sync_tolerance_seconds
+        self.timezone = system_config.timezone
 
         # Validate configuration
         if self.candle_interval_minutes <= 0:
@@ -67,46 +58,6 @@ class TimeSynchronizer:
     def get_current_time(self) -> datetime:
         """Get current time in configured timezone."""
         return datetime.now(self.tz)
-
-    def get_next_candle_boundary(self, current_time: Optional[datetime] = None) -> datetime:
-        """
-        Calculate the next candle boundary timestamp.
-
-        Args:
-            current_time: Current time (if None, uses current system time)
-
-        Returns:
-            Next candle boundary datetime
-        """
-        if current_time is None:
-            current_time = self.get_current_time()
-
-        # Ensure we're working with timezone-aware datetime
-        if current_time.tzinfo is None:
-            current_time = self.tz.localize(current_time)
-        elif current_time.tzinfo != self.tz:
-            current_time = current_time.astimezone(self.tz)
-
-        # Calculate next boundary
-        current_minute = current_time.minute
-
-        # Calculate minutes to the next multiple of candle_interval_minutes
-        minutes_to_add = self.candle_interval_minutes - (current_minute % self.candle_interval_minutes)
-
-        # If current_minute is already a multiple of candle_interval_minutes (e.g., 10:15 for 15-min)
-        # and we are exactly at 0 seconds, the next boundary is current time + interval.
-        # Otherwise, if we are past 0 seconds, the next boundary is the current time + interval.
-        if minutes_to_add == self.candle_interval_minutes:
-            minutes_to_add = 0  # This means we are exactly on a boundary, so next boundary is current time + interval
-
-        next_boundary = current_time.replace(second=0, microsecond=0) + timedelta(minutes=minutes_to_add)
-
-        # If the calculated next_boundary is in the past or exactly now (and we want the *next* one)
-        # and we are not exactly at the start of the current boundary (i.e., seconds > 0 or microseconds > 0)
-        if next_boundary <= current_time and (current_time.second > 0 or current_time.microsecond > 0):
-            next_boundary += timedelta(minutes=self.candle_interval_minutes)
-
-        return next_boundary
 
     def get_sync_target_time(self, boundary_time: datetime) -> datetime:
         """
@@ -133,7 +84,7 @@ class TimeSynchronizer:
         for attempt in range(self.max_sync_attempts):
             try:
                 now = self.get_current_time()
-                next_boundary = self.get_next_candle_boundary(now)
+                next_boundary = get_next_candle_boundary(now, self.candle_interval_minutes, self.tz)
                 target_sync_time = self.get_sync_target_time(next_boundary)
 
                 time_to_wait = (target_sync_time - now).total_seconds()
@@ -168,8 +119,10 @@ class TimeSynchronizer:
                     logger.error(
                         f"Failed to synchronize after {self.max_sync_attempts} attempts. Final error: {sync_error:.3f}s"
                     )
-                    # Return anyway but log the issue
-                    return synchronized_time
+                    raise RuntimeError(
+                        f"Time synchronization failed after {self.max_sync_attempts} attempts. "
+                        f"Final synchronization error: {sync_error:.3f}s (tolerance: {self.sync_tolerance_seconds:.3f}s)"
+                    )
 
                 # Short wait before retry
                 await asyncio.sleep(0.1)
@@ -198,7 +151,7 @@ class TimeSynchronizer:
             check_time = self.get_current_time()
 
         # Find the nearest boundary
-        boundary = self.get_next_candle_boundary(check_time)
+        boundary = get_next_candle_boundary(check_time, self.candle_interval_minutes, self.tz)
         prev_boundary = boundary - timedelta(minutes=self.candle_interval_minutes)
 
         # Check distance to both boundaries

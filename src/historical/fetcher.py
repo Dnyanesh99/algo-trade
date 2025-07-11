@@ -1,38 +1,68 @@
 import asyncio
+import time
+from collections.abc import Awaitable
 from datetime import datetime, timedelta
-from typing import Any
+from functools import wraps
+from typing import Any, Callable, TypeVar, cast
 
 from src.broker.rest_client import KiteRESTClient
-from src.utils.config_loader import config_loader
+from src.metrics import metrics_registry
+from src.utils.config_loader import ConfigLoader
 from src.utils.logger import LOGGER as logger
-from src.utils.rate_limiter import RateLimiter
 
-config = config_loader.get_config()
+_F = TypeVar("_F", bound=Callable[..., Awaitable[Any]])
+
+
+def measure_fetch_operation(func: _F) -> _F:
+    """
+    Decorator to measure the execution time of fetch operations and record metrics.
+    """
+
+    @wraps(func)
+    async def wrapper(*args: Any, **kwargs: Any) -> Any:
+        start_time = time.monotonic()
+        success = True
+        endpoint = func.__name__
+
+        try:
+            return await func(*args, **kwargs)
+        except Exception:
+            success = False
+            raise
+        finally:
+            duration = time.monotonic() - start_time
+
+            # Record broker API metrics
+            metrics_registry.record_broker_api_request(api_name=endpoint, success=success, duration=duration)
+
+            logger.debug(f"Fetch operation {endpoint} completed in {duration:.3f}s, success: {success}")
+
+    return cast("_F", wrapper)
 
 
 class HistoricalFetcher:
     """
     Fetches 1 year of 1-minute historical data from the Zerodha KiteConnect API.
     Handles the 60-day limit per request by performing date range chunking.
-    Uses a rate limiter to avoid API throttling.
     """
 
     def __init__(self, rest_client: KiteRESTClient):
+        config = ConfigLoader().get_config()
         assert config.data_pipeline is not None
         assert config.broker is not None
         assert config.performance is not None
         self.rest_client = rest_client
         self.max_days_per_request = config.data_pipeline.historical_data_max_days_per_request
-        self.rate_limiter = RateLimiter("historical_data")
         self.historical_interval = config.broker.historical_interval
         self.max_retries = config.performance.max_retries
 
+    @measure_fetch_operation
     async def fetch_historical_data(
         self, instrument_token: int, from_date: datetime, to_date: datetime
     ) -> list[dict[str, Any]]:
         """
         Fetches historical data for a given instrument and date range.
-        Automatically chunks requests and applies rate limiting.
+        Automatically chunks requests.
 
         Args:
             instrument_token (int): The instrument token.
@@ -59,13 +89,12 @@ class HistoricalFetcher:
             success = False
             while retries < self.max_retries and not success:
                 try:
-                    async with self.rate_limiter:
-                        logger.info(
-                            f"Fetching chunk for {instrument_token}: {from_date_str} to {to_date_str} (Attempt {retries + 1}/{self.max_retries})"
-                        )
-                        candles = await self.rest_client.get_historical_data(
-                            instrument_token, from_date_str, to_date_str, self.historical_interval
-                        )
+                    logger.info(
+                        f"Fetching chunk for {instrument_token}: {from_date_str} to {to_date_str} (Attempt {retries + 1}/{self.max_retries})"
+                    )
+                    candles = await self.rest_client.get_historical_data(
+                        instrument_token, from_date_str, to_date_str, self.historical_interval
+                    )
                     success = True
 
                     if candles:

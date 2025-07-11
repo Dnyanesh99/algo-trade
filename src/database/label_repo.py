@@ -1,18 +1,18 @@
 from datetime import datetime
 from typing import Any
 
-import asyncpg
 import pytz
 
 from src.database.db_utils import db_manager
 from src.database.models import LabelData
-from src.utils.config_loader import config_loader
+from src.utils.config_loader import ConfigLoader
 from src.utils.logger import LOGGER as logger
 
-config = config_loader.get_config()
+config = ConfigLoader().get_config()
+queries = ConfigLoader().get_queries()
 
 # Get the timezone from the config and create a timezone object
-app_timezone = pytz.timezone(config.system.timezone)
+app_timezone = pytz.timezone(config.system.timezone) if config.system else pytz.UTC
 
 
 class LabelRepository:
@@ -35,22 +35,7 @@ class LabelRepository:
         Returns:
             str: Command status from the database.
         """
-        query = """
-            INSERT INTO labels (ts, instrument_id, timeframe, label, tp_price, sl_price, exit_price, exit_reason, exit_bar_offset, barrier_return, max_favorable_excursion, max_adverse_excursion, risk_reward_ratio, volatility_at_entry)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-            ON CONFLICT (instrument_id, timeframe, ts) DO UPDATE
-            SET label = EXCLUDED.label,
-                tp_price = EXCLUDED.tp_price,
-                sl_price = EXCLUDED.sl_price,
-                exit_price = EXCLUDED.exit_price,
-                exit_reason = EXCLUDED.exit_reason,
-                exit_bar_offset = EXCLUDED.exit_bar_offset,
-                barrier_return = EXCLUDED.barrier_return,
-                max_favorable_excursion = EXCLUDED.max_favorable_excursion,
-                max_adverse_excursion = EXCLUDED.max_adverse_excursion,
-                risk_reward_ratio = EXCLUDED.risk_reward_ratio,
-                volatility_at_entry = EXCLUDED.volatility_at_entry
-        """
+        query = queries.label_repo["insert_labels"]
         records = [
             (
                 app_timezone.localize(d.ts) if d.ts.tzinfo is None else d.ts,
@@ -86,12 +71,7 @@ class LabelRepository:
         """
         Fetches labels data for a given instrument and timeframe within a time range.
         """
-        query = """
-            SELECT ts, timeframe, label, tp_price, sl_price, exit_price, exit_reason, exit_bar_offset, barrier_return, max_favorable_excursion, max_adverse_excursion, risk_reward_ratio, volatility_at_entry
-            FROM labels
-            WHERE instrument_id = $1 AND timeframe = $2 AND ts BETWEEN $3 AND $4
-            ORDER BY ts ASC
-        """
+        query = queries.label_repo["get_labels"]
         try:
             rows = await self.db_manager.fetch_rows(query, instrument_id, timeframe, start_time, end_time)
             logger.debug(
@@ -106,16 +86,7 @@ class LabelRepository:
         """
         Calculates and returns statistics about labels for a given instrument and timeframe.
         """
-        query = """
-            SELECT
-                label,
-                COUNT(*) as count,
-                AVG(barrier_return) as avg_return,
-                STDDEV(barrier_return) as std_return
-            FROM labels
-            WHERE instrument_id = $1 AND timeframe = $2
-            GROUP BY label
-        """
+        query = queries.label_repo["get_label_statistics"]
         try:
             rows = await self.db_manager.fetch_rows(query, instrument_id, timeframe)
             stats: dict[str, Any] = {"total_labels": 0}
@@ -132,12 +103,3 @@ class LabelRepository:
         except Exception as e:
             logger.error(f"Error fetching label statistics for {instrument_id} ({timeframe}): {e}")
             raise
-
-    async def get_labels_by_instrument(
-        self, instrument_id: int, timeframe: str, start_time: datetime, end_time: datetime
-    ) -> list[LabelData]:
-        """
-        Fetches labels data for a given instrument and timeframe within a time range.
-        Alias for get_labels method for consistent API.
-        """
-        return await self.get_labels(instrument_id, timeframe, start_time, end_time)

@@ -2,11 +2,11 @@ import asyncio
 from typing import Any, Callable, Optional
 
 from src.broker.websocket_client import KiteWebSocketClient
-from src.utils.config_loader import config_loader
+from src.utils.config_loader import ConfigLoader
 from src.utils.logger import LOGGER as logger  # Centralized logger
 
 # Load configuration
-config = config_loader.get_config()
+config = ConfigLoader().get_config()
 
 
 class ConnectionManager:
@@ -28,7 +28,9 @@ class ConnectionManager:
         if config.broker and config.broker.connection_manager:
             self._monitor_interval = config.broker.connection_manager.monitor_interval
         else:
-            logger.warning("Broker connection manager configuration not found. Using default monitor interval (5 seconds).")
+            logger.warning(
+                "Broker connection manager configuration not found. Using default monitor interval (5 seconds)."
+            )
             self._monitor_interval = 5  # Default value
 
         # Assign KiteTicker callbacks to be handled by ConnectionManager

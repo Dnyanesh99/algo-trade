@@ -1,0 +1,162 @@
+feature_repo:
+  insert_features: |
+    INSERT INTO features (ts, instrument_id, timeframe, feature_name, feature_value)
+    VALUES ($1, $2, $3, $4, $5)
+    ON CONFLICT (instrument_id, timeframe, feature_name, ts) DO UPDATE
+    SET feature_value = EXCLUDED.feature_value
+  get_features: |
+    SELECT ts, feature_name, feature_value
+    FROM features
+    WHERE instrument_id = $1 AND timeframe = $2 AND ts BETWEEN $3 AND $4
+    ORDER BY ts ASC, feature_name ASC
+  get_latest_features: |
+    SELECT ts, feature_name, feature_value
+    FROM features
+    WHERE instrument_id = $1 AND timeframe = $2 AND ts = (
+        SELECT MAX(ts) FROM features WHERE instrument_id = $1 AND timeframe = $2
+    )
+    ORDER BY feature_name ASC
+  get_latest_n_features: |
+    SELECT ts, feature_name, feature_value
+    FROM features
+    WHERE instrument_id = $1 AND timeframe = $2
+    ORDER BY ts DESC
+    LIMIT $3
+  get_training_data: |
+    SELECT f.ts, f.feature_name, f.feature_value, l.label
+    FROM features f
+    LEFT JOIN labels l ON f.ts = l.ts AND f.instrument_id = l.instrument_id AND f.timeframe = l.timeframe
+    WHERE f.instrument_id = $1 AND f.timeframe = $2 AND f.ts BETWEEN $3 AND $4
+    ORDER BY f.ts, f.feature_name
+  insert_engineered_features: |
+    INSERT INTO engineered_features
+    (instrument_id, timeframe, timestamp, feature_name, feature_value,
+      generation_method, source_features, quality_score)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+    ON CONFLICT (timestamp, instrument_id, timeframe, feature_name)
+    DO UPDATE SET
+        feature_value = EXCLUDED.feature_value,
+        generation_method = EXCLUDED.generation_method,
+        source_features = EXCLUDED.source_features,
+        quality_score = EXCLUDED.quality_score
+  insert_feature_scores: |
+    INSERT INTO feature_scores
+    (instrument_id, timeframe, timestamp, feature_name, importance_score,
+      stability_score, consistency_score, composite_score, model_version)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+    ON CONFLICT (instrument_id, timeframe, feature_name, timestamp)
+    DO UPDATE SET
+        importance_score = EXCLUDED.importance_score,
+        stability_score = EXCLUDED.stability_score,
+        consistency_score = EXCLUDED.consistency_score,
+        composite_score = EXCLUDED.composite_score,
+        model_version = EXCLUDED.model_version
+  get_latest_feature_selection: |
+    SELECT selected_features
+    FROM feature_selection_history
+    WHERE instrument_id = $1 AND timeframe = $2
+    ORDER BY timestamp DESC
+    LIMIT 1
+  insert_feature_selection_history: |
+    INSERT INTO feature_selection_history
+    (instrument_id, timeframe, timestamp, selected_features,
+      total_features_considered, selection_method, model_version)
+    VALUES ($1, $2, $3, $4, $5, $6, $7)
+
+instrument_repo:
+  insert_instrument: |
+    INSERT INTO instruments (
+        instrument_token, exchange_token, tradingsymbol, name, last_price,
+        expiry, strike, tick_size, lot_size, instrument_type, segment, exchange, last_updated
+    ) VALUES (
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW()
+    ) RETURNING instrument_id;
+  update_instrument: |
+    UPDATE instruments SET
+        instrument_token = $1, exchange_token = $2, tradingsymbol = $3, name = $4, last_price = $5,
+        expiry = $6, strike = $7, tick_size = $8, lot_size = $9, instrument_type = $10, segment = $11,
+        exchange = $12, last_updated = NOW()
+    WHERE instrument_id = $13;
+  get_instrument_by_tradingsymbol: "SELECT * FROM instruments WHERE tradingsymbol = $1 AND exchange = $2;"
+  get_instrument_by_token: "SELECT * FROM instruments WHERE instrument_token = $1;"
+  get_all_instruments: "SELECT * FROM instruments;"
+  get_instruments_by_type: "SELECT * FROM instruments WHERE instrument_type = $1 AND exchange = $2;"
+
+label_repo:
+  insert_labels: |
+    INSERT INTO labels (ts, instrument_id, timeframe, label, tp_price, sl_price, exit_price, exit_reason, exit_bar_offset, barrier_return, max_favorable_excursion, max_adverse_excursion, risk_reward_ratio, volatility_at_entry)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+    ON CONFLICT (instrument_id, timeframe, ts) DO UPDATE
+    SET label = EXCLUDED.label,
+        tp_price = EXCLUDED.tp_price,
+        sl_price = EXCLUDED.sl_price,
+        exit_price = EXCLUDED.exit_price,
+        exit_reason = EXCLUDED.exit_reason,
+        exit_bar_offset = EXCLUDED.exit_bar_offset,
+        barrier_return = EXCLUDED.barrier_return,
+        max_favorable_excursion = EXCLUDED.max_favorable_excursion,
+        max_adverse_excursion = EXCLUDED.max_adverse_excursion,
+        risk_reward_ratio = EXCLUDED.risk_reward_ratio,
+        volatility_at_entry = EXCLUDED.volatility_at_entry
+  get_labels: |
+    SELECT ts, timeframe, label, tp_price, sl_price, exit_price, exit_reason, exit_bar_offset, barrier_return, max_favorable_excursion, max_adverse_excursion, risk_reward_ratio, volatility_at_entry
+    FROM labels
+    WHERE instrument_id = $1 AND timeframe = $2 AND ts BETWEEN $3 AND $4
+    ORDER BY ts ASC
+  get_label_statistics: |
+    SELECT
+        label,
+        COUNT(*) as count,
+        AVG(barrier_return) as avg_return,
+        STDDEV(barrier_return) as std_return
+    FROM labels
+    WHERE instrument_id = $1 AND timeframe = $2
+    GROUP BY label
+
+ohlcv_repo:
+  insert_ohlcv_data: |
+    INSERT INTO {table_name} (ts, instrument_id, open, high, low, close, volume, oi)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+    ON CONFLICT (instrument_id, ts) DO UPDATE
+    SET open = EXCLUDED.open,
+        high = EXCLUDED.high,
+        low = EXCLUDED.low,
+        close = EXCLUDED.close,
+        volume = EXCLUDED.volume,
+        oi = EXCLUDED.oi
+  get_ohlcv_data: "SELECT * FROM {table_name} WHERE instrument_id = $1 AND ts BETWEEN $2 AND $3 ORDER BY ts ASC"
+  get_latest_candle: "SELECT * FROM {table_name} WHERE instrument_id = $1 ORDER BY ts DESC LIMIT 1"
+  get_ohlcv_data_for_features: "SELECT ts, open, high, low, close, volume FROM {table_name} WHERE instrument_id = $1 ORDER BY ts DESC LIMIT $2"
+  check_data_availability: "SELECT COUNT(*) as candle_count FROM {table_name} WHERE ts >= $1 AND ts <= $2"
+
+signal_repo:
+  insert_signal: |
+    INSERT INTO signals (ts, instrument_id, signal_type, direction, confidence_score, source_feature_name, price_at_signal, source_feature_value, details)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+    ON CONFLICT (instrument_id, signal_type, ts) DO UPDATE
+    SET direction = EXCLUDED.direction,
+        confidence_score = EXCLUDED.confidence_score,
+        source_feature_name = EXCLUDED.source_feature_name,
+        price_at_signal = EXCLUDED.price_at_signal,
+        source_feature_value = EXCLUDED.source_feature_value,
+        details = EXCLUDED.details
+  get_signals: |
+    SELECT ts, signal_type, direction, confidence_score, source_feature_name, price_at_signal, source_feature_value, details
+    FROM signals
+    WHERE instrument_id = $1 AND ts BETWEEN $2 AND $3
+  get_signal_history: |
+    SELECT ts, signal_type, direction, confidence_score, price_at_signal
+    FROM signals
+    WHERE instrument_id = $1
+    ORDER BY ts DESC
+    LIMIT $2
+
+migrate:
+  create_migrations_table: |
+    CREATE TABLE IF NOT EXISTS schema_migrations (
+        version VARCHAR(50) PRIMARY KEY,
+        executed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        execution_time_ms INTEGER NOT NULL
+    );
+  get_applied_migrations: "SELECT version FROM schema_migrations ORDER BY executed_at"
+  insert_migration: "INSERT INTO schema_migrations (version, execution_time_ms) VALUES ($1, $2)"

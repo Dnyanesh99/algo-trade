@@ -2,14 +2,14 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-import asyncpg
 
-from src.database.db_utils import DatabaseManager, db_manager
+from src.database.db_utils import DatabaseManager
 from src.utils.config_loader import config_loader
 from src.utils.logger import LOGGER as logger
 
 # Load configuration for tests
 config = config_loader.get_config()
+
 
 @pytest.fixture
 async def setup_db_manager():
@@ -20,6 +20,7 @@ async def setup_db_manager():
     yield manager
     await manager.close()
 
+
 @pytest.mark.asyncio
 async def test_db_manager_singleton(setup_db_manager):
     logger.info("\n--- Starting test_db_manager_singleton ---")
@@ -28,14 +29,15 @@ async def test_db_manager_singleton(setup_db_manager):
     assert manager1 is manager2
     logger.info("test_db_manager_singleton completed successfully.")
 
+
 @pytest.mark.asyncio
 async def test_db_manager_initialize_close(setup_db_manager):
     logger.info("\n--- Starting test_db_manager_initialize_close ---")
     manager = setup_db_manager
 
     with (
-        patch('src.database.db_utils.asyncpg.create_pool', new=AsyncMock()) as mock_create_pool,
-        patch('src.database.db_utils.logger.info') as mock_logger_info,
+        patch("src.database.db_utils.asyncpg.create_pool", new=AsyncMock()) as mock_create_pool,
+        patch("src.database.db_utils.logger.info") as mock_logger_info,
     ):
         mock_pool = AsyncMock()
         mock_create_pool.return_value = mock_pool
@@ -50,6 +52,7 @@ async def test_db_manager_initialize_close(setup_db_manager):
         assert manager._pool is None
         mock_logger_info.assert_any_call("Database connection pool closed.")
     logger.info("test_db_manager_initialize_close completed successfully.")
+
 
 @pytest.mark.asyncio
 async def test_db_manager_transaction(setup_db_manager):
@@ -70,6 +73,7 @@ async def test_db_manager_transaction(setup_db_manager):
     conn.transaction.return_value.rollback.assert_not_called()
     logger.info("test_db_manager_transaction completed successfully.")
 
+
 @pytest.mark.asyncio
 async def test_db_manager_transaction_rollback(setup_db_manager):
     logger.info("\n--- Starting test_db_manager_transaction_rollback ---")
@@ -87,6 +91,7 @@ async def test_db_manager_transaction_rollback(setup_db_manager):
     mock_conn.transaction.return_value.rollback.assert_called_once()
     mock_conn.transaction.return_value.commit.assert_not_called()
     logger.info("test_db_manager_transaction_rollback completed successfully.")
+
 
 @pytest.mark.asyncio
 async def test_db_manager_fetch_rows(setup_db_manager):

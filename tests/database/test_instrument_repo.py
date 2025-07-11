@@ -11,6 +11,7 @@ from src.utils.logger import LOGGER as logger
 # Load configuration for tests
 config = config_loader.get_config()
 
+
 @pytest.fixture
 async def setup_instrument_repo():
     # Ensure a clean state for the singleton DatabaseManager
@@ -18,15 +19,16 @@ async def setup_instrument_repo():
     DatabaseManager._pool = None
     db_manager_instance = DatabaseManager()
 
-    with patch('src.database.db_utils.asyncpg.create_pool', new=AsyncMock()):
+    with patch("src.database.db_utils.asyncpg.create_pool", new=AsyncMock()):
         await db_manager_instance.initialize()
 
         # Mock the db_manager for the repository
-        with patch('src.database.instrument_repo.db_manager', new=db_manager_instance):
+        with patch("src.database.instrument_repo.db_manager", new=db_manager_instance):
             repo = InstrumentRepository()
             yield repo
 
     await db_manager_instance.close()
+
 
 @pytest.mark.asyncio
 async def test_insert_instrument(setup_instrument_repo):
@@ -54,6 +56,7 @@ async def test_insert_instrument(setup_instrument_repo):
     assert instrument_id == 1
     repo.db_manager.get_connection.return_value.__aenter__.return_value.fetchval.assert_called_once()
     logger.info("test_insert_instrument completed successfully.")
+
 
 @pytest.mark.asyncio
 async def test_update_instrument(setup_instrument_repo):
@@ -83,6 +86,7 @@ async def test_update_instrument(setup_instrument_repo):
     repo.db_manager.get_connection.return_value.__aenter__.return_value.execute.assert_called_once()
     logger.info("test_update_instrument completed successfully.")
 
+
 @pytest.mark.asyncio
 async def test_get_instrument_by_tradingsymbol(setup_instrument_repo):
     logger.info("\n--- Starting test_get_instrument_by_tradingsymbol ---")
@@ -98,6 +102,7 @@ async def test_get_instrument_by_tradingsymbol(setup_instrument_repo):
     repo.db_manager.get_connection.return_value.__aenter__.return_value.fetchrow.assert_called_once()
     logger.info("test_get_instrument_by_tradingsymbol completed successfully.")
 
+
 @pytest.mark.asyncio
 async def test_get_instrument_by_token(setup_instrument_repo):
     logger.info("\n--- Starting test_get_instrument_by_token ---")
@@ -112,18 +117,23 @@ async def test_get_instrument_by_token(setup_instrument_repo):
     repo.db_manager.get_connection.return_value.__aenter__.return_value.fetchrow.assert_called_once()
     logger.info("test_get_instrument_by_token completed successfully.")
 
+
 @pytest.mark.asyncio
 async def test_get_all_instruments(setup_instrument_repo):
     logger.info("\n--- Starting test_get_all_instruments ---")
     repo = setup_instrument_repo
 
-    mock_records = [MagicMock(instrument_token=1, tradingsymbol="SYM1"), MagicMock(instrument_token=2, tradingsymbol="SYM2")]
+    mock_records = [
+        MagicMock(instrument_token=1, tradingsymbol="SYM1"),
+        MagicMock(instrument_token=2, tradingsymbol="SYM2"),
+    ]
     repo.db_manager.get_connection.return_value.__aenter__.return_value.fetch = AsyncMock(return_value=mock_records)
 
     instruments = await repo.get_all_instruments()
     assert len(instruments) == 2
     repo.db_manager.get_connection.return_value.__aenter__.return_value.fetch.assert_called_once()
     logger.info("test_get_all_instruments completed successfully.")
+
 
 @pytest.mark.asyncio
 async def test_get_instruments_by_type(setup_instrument_repo):

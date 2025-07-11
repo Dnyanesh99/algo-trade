@@ -11,11 +11,13 @@ from src.utils.logger import LOGGER as logger
 # Load configuration for tests
 config = config_loader.get_config()
 
+
 @pytest.fixture
 def mock_rest_client():
-    with patch('src.broker.backfill_manager.KiteRESTClient') as MockKiteRESTClient:
+    with patch("src.broker.backfill_manager.KiteRESTClient") as MockKiteRESTClient:
         mock_instance = MockKiteRESTClient.return_value
         yield mock_instance
+
 
 @pytest.mark.asyncio
 async def test_fetch_missing_data_success(mock_rest_client):
@@ -37,6 +39,7 @@ async def test_fetch_missing_data_success(mock_rest_client):
     mock_rest_client.get_historical_data.assert_called_once()
     logger.info("test_fetch_missing_data_success completed successfully.")
 
+
 @pytest.mark.asyncio
 async def test_fetch_missing_data_no_candles(mock_rest_client):
     logger.info("\n--- Starting test_fetch_missing_data_no_candles ---")
@@ -53,6 +56,7 @@ async def test_fetch_missing_data_no_candles(mock_rest_client):
     mock_rest_client.get_historical_data.assert_called_once()
     logger.info("test_fetch_missing_data_no_candles completed successfully.")
 
+
 @pytest.mark.asyncio
 async def test_fetch_missing_data_error(mock_rest_client):
     logger.info("\n--- Starting test_fetch_missing_data_error ---")
@@ -68,6 +72,7 @@ async def test_fetch_missing_data_error(mock_rest_client):
     assert missing_candles is None
     mock_rest_client.get_historical_data.assert_called_once()
     logger.info("test_fetch_missing_data_error completed successfully.")
+
 
 @pytest.mark.asyncio
 async def test_merge_with_live_stream():

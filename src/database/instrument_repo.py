@@ -2,7 +2,10 @@ from typing import Optional
 
 from src.database.db_utils import db_manager
 from src.database.models import InstrumentData, InstrumentRecord
+from src.utils.config_loader import ConfigLoader
 from src.utils.logger import LOGGER as logger
+
+queries = ConfigLoader().get_queries()
 
 
 class InstrumentRepository:
@@ -18,14 +21,7 @@ class InstrumentRepository:
         Inserts a new instrument record into the database.
         Returns the instrument_id if successful, None otherwise.
         """
-        query = """
-            INSERT INTO instruments (
-                instrument_token, exchange_token, tradingsymbol, name, last_price,
-                expiry, strike, tick_size, lot_size, instrument_type, segment, exchange, last_updated
-            ) VALUES (
-                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW()
-            ) RETURNING instrument_id;
-        """
+        query = queries.instrument_repo["insert_instrument"]
         try:
             async with self.db_manager.get_connection() as conn:
                 instrument_id = await conn.fetchval(
@@ -54,13 +50,7 @@ class InstrumentRepository:
         Updates an existing instrument record in the database.
         Returns True if successful, False otherwise.
         """
-        query = """
-            UPDATE instruments SET
-                instrument_token = $1, exchange_token = $2, tradingsymbol = $3, name = $4, last_price = $5,
-                expiry = $6, strike = $7, tick_size = $8, lot_size = $9, instrument_type = $10, segment = $11,
-                exchange = $12, last_updated = NOW()
-            WHERE instrument_id = $13;
-        """
+        query = queries.instrument_repo["update_instrument"]
         try:
             async with self.db_manager.get_connection() as conn:
                 await conn.execute(
@@ -89,7 +79,7 @@ class InstrumentRepository:
         """
         Retrieves an instrument by its trading symbol and exchange.
         """
-        query = "SELECT * FROM instruments WHERE tradingsymbol = $1 AND exchange = $2;"
+        query = queries.instrument_repo["get_instrument_by_tradingsymbol"]
         try:
             async with self.db_manager.get_connection() as conn:
                 record = await conn.fetchrow(query, tradingsymbol, exchange)
@@ -102,7 +92,7 @@ class InstrumentRepository:
         """
         Retrieves an instrument by its instrument token.
         """
-        query = "SELECT * FROM instruments WHERE instrument_token = $1;"
+        query = queries.instrument_repo["get_instrument_by_token"]
         try:
             async with self.db_manager.get_connection() as conn:
                 record = await conn.fetchrow(query, instrument_token)
@@ -115,7 +105,7 @@ class InstrumentRepository:
         """
         Retrieves all instruments stored in the database.
         """
-        query = "SELECT * FROM instruments;"
+        query = queries.instrument_repo["get_all_instruments"]
         try:
             async with self.db_manager.get_connection() as conn:
                 records = await conn.fetch(query)
@@ -128,7 +118,7 @@ class InstrumentRepository:
         """
         Retrieves instruments by type and exchange.
         """
-        query = "SELECT * FROM instruments WHERE instrument_type = $1 AND exchange = $2;"
+        query = queries.instrument_repo["get_instruments_by_type"]
         try:
             async with self.db_manager.get_connection() as conn:
                 records = await conn.fetch(query, instrument_type, exchange)

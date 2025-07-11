@@ -1,0 +1,144 @@
+# Docker Makefile for Algo Trading System
+.PHONY: help build build-dev up up-dev up-prod down down-dev clean logs logs-dev shell shell-dev db-shell prometheus grafana
+
+# Default target
+help:
+	@echo "Available commands:"
+	@echo "  build      - Build the Docker image for production"
+	@echo "  build-dev  - Build the Docker image for development"
+	@echo "  up         - Start production environment"
+	@echo "  up-dev     - Start development environment with hot reloading"
+	@echo "  up-prod    - Start full production environment"
+	@echo "  down       - Stop production containers"
+	@echo "  down-dev   - Stop development containers"
+	@echo "  clean      - Remove containers, volumes, and images"
+	@echo "  logs       - View production logs"
+	@echo "  logs-dev   - View development logs"
+	@echo "  shell      - Access production container shell"
+	@echo "  shell-dev  - Access development container shell"
+	@echo "  db-shell   - Access TimescaleDB shell"
+	@echo "  prometheus - Open Prometheus in browser"
+	@echo "  grafana    - Open Grafana in browser"
+
+# Build production image
+build:
+	docker-compose build --target production
+
+# Build development image
+build-dev:
+	docker compose -f docker-compose.dev.yml build
+
+# Start production environment
+up:
+	@echo "Creating data directories..."
+	@mkdir -p data/timescaledb data/prometheus data/grafana
+	docker-compose up -d
+	@echo "Production environment started."
+	@echo "Services available at:"
+	@echo "  - Application: http://localhost:8000"
+	@echo "  - Grafana: http://localhost:3000 (admin/admin123)"
+	@echo "  - Prometheus: http://localhost:9090"
+	@echo "  - TimescaleDB: localhost:15432"
+
+# Start development environment with hot reloading
+up-dev:
+	@echo "Creating data directories..."
+	@mkdir -p data/dev/timescaledb
+	docker compose -f docker-compose.dev.yml up -d
+	@echo "Development environment with hot reloading started."
+	@echo "Services available at:"
+	@echo "  - Application: http://localhost:8000 (auto-restarts on code changes)"
+	@echo "  - TimescaleDB: localhost:15432"
+	@echo ""
+	@echo "💡 Edit any Python file to see auto-restart in action!"
+	@echo "📋 View logs with: make logs-dev"
+
+# Start production environment
+up-prod:
+	@echo "Creating data directories..."
+	@mkdir -p data/timescaledb data/prometheus data/grafana
+	docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+	@echo "Production environment started."
+	@echo "Services available at:"
+	@echo "  - Application: http://localhost:8000"
+	@echo "  - Grafana: http://localhost:3000"
+	@echo "  - Prometheus: http://localhost:9090"
+	@echo "  - TimescaleDB: localhost:5432"
+
+# Stop production containers
+down:
+	docker-compose down
+
+# Stop development containers
+down-dev:
+	docker compose -f docker-compose.dev.yml down
+
+# Clean up everything (containers, volumes, images)
+clean:
+	docker compose down -v --rmi all
+	
+	@echo "All Docker resources cleaned up."
+
+# View production logs
+logs:
+	docker-compose logs -f
+
+# View development logs
+logs-dev:
+	docker compose -f docker-compose.dev.yml logs -f
+
+# Access production container shell
+shell:
+	docker-compose exec algo-trade-app /bin/bash
+
+# Access development container shell
+shell-dev:
+	docker compose -f docker-compose.dev.yml exec algo-trade-app-dev /bin/bash
+
+# Access database shell
+db-shell:
+	docker-compose exec timescaledb psql -U algo_trader -d algo_trade_db
+
+# Open Prometheus in browser
+prometheus:
+	@echo "Opening Prometheus at http://localhost:9090"
+	@command -v xdg-open >/dev/null 2>&1 && xdg-open http://localhost:9090 || echo "Please open http://localhost:9090 manually"
+
+# Open Grafana in browser
+grafana:
+	@echo "Opening Grafana at http://localhost:3000"
+	@echo "Default credentials: admin/admin123"
+	@command -v xdg-open >/dev/null 2>&1 && xdg-open http://localhost:3000 || echo "Please open http://localhost:3000 manually"
+
+# Health check
+health:
+	@echo "Checking service health..."
+	@docker-compose ps
+	@echo ""
+	@echo "Application health:"
+	@curl -s http://localhost:8000/health || echo "Application not responding"
+	@echo ""
+	@echo "Prometheus health:"
+	@curl -s http://localhost:9090/-/healthy || echo "Prometheus not responding"
+	@echo ""
+	@echo "Grafana health:"
+	@curl -s http://localhost:3000/api/health || echo "Grafana not responding"
+
+# Backup database
+backup-db:
+	@echo "Creating database backup..."
+	@mkdir -p backups
+	docker-compose exec timescaledb pg_dump -U algo_trader -d algo_trade_db > backups/backup_$(shell date +%Y%m%d_%H%M%S).sql
+	@echo "Database backup created in backups/"
+
+# Restore database
+restore-db:
+	@echo "Available backups:"
+	@ls -la backups/*.sql 2>/dev/null || echo "No backups found"
+	@echo "Usage: make restore-db BACKUP=backups/backup_YYYYMMDD_HHMMSS.sql"
+ifdef BACKUP
+	docker-compose exec -T timescaledb psql -U algo_trader -d algo_trade_db < $(BACKUP)
+	@echo "Database restored from $(BACKUP)"
+else
+	@echo "Please specify BACKUP file: make restore-db BACKUP=backups/backup_YYYYMMDD_HHMMSS.sql"
+endif

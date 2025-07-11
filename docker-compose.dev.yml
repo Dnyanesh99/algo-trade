@@ -1,0 +1,108 @@
+services:
+  # TimescaleDB Database (same as production)
+  timescaledb:
+    image: timescale/timescaledb:2.11.2-pg15
+    container_name: algo-trade-timescaledb-dev
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME}
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_INITDB_ARGS: "-A md5"
+      TS_TUNE_MEMORY: 2GB
+      TS_TUNE_NUM_CPUS: 2
+    volumes:
+      - timescaledb_dev_data:/var/lib/postgresql/data
+      - ./src/database/migrations:/docker-entrypoint-initdb.d
+    ports:
+      - "15432:5432"
+    networks:
+      - algo-trade-dev-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    command: >
+      postgres
+      -c shared_preload_libraries=timescaledb
+      -c max_connections=100
+      -c shared_buffers=128MB
+      -c effective_cache_size=512MB
+      -c work_mem=2MB
+      -c maintenance_work_mem=32MB
+      -c checkpoint_completion_target=0.9
+      -c wal_buffers=8MB
+      -c default_statistics_target=50
+      -c log_min_duration_statement=1000
+      -c log_checkpoints=on
+      -c log_connections=on
+      -c log_disconnections=on
+
+  # Development App with Hot Reloading
+  algo-trade-app-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    container_name: algo-trade-app-dev
+    restart: unless-stopped
+    env_file:
+      - ./.env
+    environment:
+      - DB_HOST=timescaledb
+      - DB_PORT=5432
+      - DB_NAME=${DB_NAME}
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_DBNAME=${DB_NAME}
+      - DB_MIN_CONNECTIONS=${DB_MIN_CONNECTIONS}
+      - DB_MAX_CONNECTIONS=${DB_MAX_CONNECTIONS}
+      - DB_TIMEOUT=${DB_TIMEOUT}
+      - PYTHONPATH=/app
+      - DEVELOPMENT=1
+    ports:
+      - "8000:8000"
+      - "8001:8001"
+    volumes:
+      # Mount source code for hot reloading
+      - ./src:/app/src:ro
+      - ./main.py:/app/main.py:ro
+      - ./config:/app/config
+      - ./pyproject.toml:/app/pyproject.toml:ro
+      # Persistent volumes for data
+      - ./logs:/app/logs
+      - ./cache:/app/cache
+      - ./models:/app/models
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    networks:
+      - algo-trade-dev-network
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    # Remove resource limits for development
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '2.0'
+
+volumes:
+  timescaledb_dev_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./data/dev/timescaledb
+
+networks:
+  algo-trade-dev-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.21.0.0/16

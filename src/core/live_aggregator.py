@@ -12,12 +12,12 @@ from src.database.models import OHLCVData
 from src.database.ohlcv_repo import OHLCVRepository
 from src.state.error_handler import ErrorHandler
 from src.state.health_monitor import HealthMonitor
-from src.utils.config_loader import config_loader
+from src.utils.config_loader import ConfigLoader
 from src.utils.logger import LOGGER as logger
-from src.utils.performance_metrics import PerformanceMetrics
+from src.utils.time_helper import get_candle_start_time
 
 # Load configuration
-config = config_loader.get_config()
+config = ConfigLoader().get_config()
 
 
 class CandleData(BaseModel):
@@ -64,14 +64,12 @@ class LiveAggregator:
         ohlcv_repo: OHLCVRepository,
         error_handler: ErrorHandler,
         health_monitor: HealthMonitor,
-        performance_metrics: PerformanceMetrics,
         on_15min_candle_complete: Optional[Callable[[dict[str, Any]], Any]] = None,
     ):
         # Core dependencies
         self.ohlcv_repo = ohlcv_repo
         self.error_handler = error_handler
         self.health_monitor = health_monitor
-        self.performance_metrics = performance_metrics
         self.candle_validator = CandleValidator()
 
         # Configuration from config.yaml
@@ -99,6 +97,10 @@ class LiveAggregator:
         self._processing_lock = asyncio.Lock()
         self._active_instruments: set[int] = set()
 
+        # NEW: Cross-Asset Data Collection
+        self._cross_asset_instruments = config.model_training.feature_engineering.cross_asset.instruments
+        self._cross_asset_data: dict[int, dict[str, Any]] = {}  # {instrument_id: latest_candle_data}
+
         # Performance tracking
         self.stats = AggregationStats()
 
@@ -109,7 +111,8 @@ class LiveAggregator:
 
         logger.info(
             f"LiveAggregator initialized with timeframes {self.timeframes}, "
-            f"validation_enabled={self.validation_enabled}"
+            f"validation_enabled={self.validation_enabled}, "
+            f"cross_asset_instruments={len(self._cross_asset_instruments)}"
         )
 
     async def process_one_minute_candle(self, candle: dict[str, Any]) -> bool:
@@ -147,6 +150,9 @@ class LiveAggregator:
 
             # Track active instruments
             self._active_instruments.add(instrument_token)
+
+            # NEW: Collect cross-asset data for correlation analysis
+            await self._collect_cross_asset_data(instrument_token, candle_data)
 
             # Memory management check
             total_partial = sum(len(tf_candles) for tf_candles in self._partial_candles.values())
@@ -256,14 +262,6 @@ class LiveAggregator:
             logger.error(f"Error processing {tf}-min timeframe for {instrument_token}: {e}")
             return False
 
-    def _get_candle_start_time(self, timestamp: datetime, timeframe_minutes: int) -> datetime:
-        """
-        Calculates the start time of the higher-timeframe candle for a given timestamp.
-        """
-        timestamp_in_minutes = timestamp.hour * 60 + timestamp.minute
-        floored_minute = (timestamp_in_minutes // timeframe_minutes) * timeframe_minutes
-        return timestamp.replace(hour=floored_minute // 60, minute=floored_minute % 60, second=0, microsecond=0)
-
     async def _emit_and_store_candle(self, candle_data: dict[str, Any]) -> bool:
         """
         Emits the completed candle via callback and stores it in the database.
@@ -314,8 +312,8 @@ class LiveAggregator:
                         high=candle_data["high"],
                         low=candle_data["low"],
                         close=candle_data["close"],
-                        volume=candle_data["volume"],
-                        oi=candle_data["oi"],
+                        volume=int(candle_data["volume"]),
+                        oi=int(candle_data["oi"]) if candle_data["oi"] is not None else None,
                     )
                 ],
             )
@@ -371,6 +369,12 @@ class LiveAggregator:
 
         except Exception as e:
             logger.error(f"Error during partial candle cleanup: {e}")
+
+    def _get_candle_start_time(self, timestamp: datetime, timeframe_minutes: int) -> datetime:
+        """
+        Calculate the start time of a candle for the given timestamp and timeframe.
+        """
+        return get_candle_start_time(timestamp, timeframe_minutes)
 
     async def flush_all_partial_candles(self) -> int:
         """
@@ -431,3 +435,85 @@ class LiveAggregator:
             "stats": stats,
             "timestamp": datetime.now().isoformat(),
         }
+
+    async def _collect_cross_asset_data(self, instrument_token: int, candle_data: CandleData) -> None:
+        """
+        Collect and store cross-asset data for correlation analysis.
+
+        Args:
+            instrument_token: Token of the instrument
+            candle_data: Validated candle data
+        """
+        try:
+            # Check if this instrument is one of our cross-asset instruments
+            if instrument_token in self._cross_asset_instruments:
+                symbol_name = self._cross_asset_instruments[instrument_token]
+
+                # Store latest candle data for cross-asset correlation
+                self._cross_asset_data[instrument_token] = {
+                    "symbol": symbol_name,
+                    "timestamp": candle_data.start_time,
+                    "open": candle_data.open,
+                    "high": candle_data.high,
+                    "low": candle_data.low,
+                    "close": candle_data.close,
+                    "volume": candle_data.volume,
+                    "last_updated": datetime.now(),
+                }
+
+                logger.debug(
+                    f"Updated cross-asset data for {symbol_name} (token: {instrument_token}): "
+                    f"close={candle_data.close}, time={candle_data.start_time}"
+                )
+
+                # Store in database for historical correlation analysis
+                await self._store_cross_asset_ohlcv(instrument_token, candle_data)
+
+        except Exception as e:
+            logger.warning(f"Failed to collect cross-asset data for {instrument_token}: {e}")
+
+    async def _store_cross_asset_ohlcv(self, instrument_token: int, candle_data: CandleData) -> None:
+        """
+        Store cross-asset OHLCV data in database for correlation analysis.
+
+        Args:
+            instrument_token: Token of the cross-asset instrument
+            candle_data: Validated candle data
+        """
+        try:
+            # Convert to OHLCVData model for database storage
+            ohlcv_data = OHLCVData(
+                ts=candle_data.start_time,
+                open=candle_data.open,
+                high=candle_data.high,
+                low=candle_data.low,
+                close=candle_data.close,
+                volume=int(candle_data.volume),
+                oi=int(candle_data.oi) if candle_data.oi is not None else None,
+            )
+
+            # Store 1-minute data for cross-asset instruments
+            await self.ohlcv_repo.insert_ohlcv_data(instrument_token, "1min", [ohlcv_data])
+
+            logger.debug(f"Stored cross-asset OHLCV data for instrument {instrument_token}")
+
+        except Exception as e:
+            logger.warning(f"Failed to store cross-asset OHLCV data for {instrument_token}: {e}")
+
+    def get_cross_asset_data(self) -> dict[int, dict[str, Any]]:
+        """
+        Get current cross-asset data for correlation analysis.
+
+        Returns:
+            Dictionary mapping instrument_token to latest candle data
+        """
+        return self._cross_asset_data.copy()
+
+    def get_cross_asset_instruments(self) -> dict[int, str]:
+        """
+        Get mapping of cross-asset instrument tokens to symbols.
+
+        Returns:
+            Dictionary mapping instrument_token to symbol name
+        """
+        return self._cross_asset_instruments.copy()

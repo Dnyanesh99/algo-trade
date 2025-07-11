@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 from pydantic import BaseModel, field_validator
 
@@ -20,10 +20,10 @@ class InstrumentData(BaseModel):
 
     @field_validator("expiry", mode="before")
     @classmethod
-    def validate_expiry(cls, v):
+    def validate_expiry(cls, v: Any) -> Optional[datetime]:
         if v is None or v == "" or v == "None":
             return None
-        return v
+        return cast("Optional[datetime]", v)
 
 
 class InstrumentRecord(InstrumentData):

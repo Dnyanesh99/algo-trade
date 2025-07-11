@@ -2,10 +2,8 @@ from dataclasses import dataclass
 
 import pandas as pd
 
-from src.utils.config_loader import DataQualityPenaltiesConfig, config_loader
+from src.utils.config_loader import DataQualityConfig
 from src.utils.logger import LOGGER as logger
-
-config = config_loader.get_config()
 
 
 @dataclass
@@ -30,7 +28,12 @@ class DataValidator:
     """Comprehensive data validation and cleaning."""
 
     @staticmethod
-    def validate_ohlcv(df: pd.DataFrame, symbol: str = "UNKNOWN", instrument_type: str = "UNKNOWN") -> tuple[bool, pd.DataFrame, DataQualityReport]:
+    def validate_ohlcv(
+        df: pd.DataFrame,
+        data_quality_config: DataQualityConfig,
+        symbol: str = "UNKNOWN",
+        instrument_type: str = "UNKNOWN",
+    ) -> tuple[bool, pd.DataFrame, DataQualityReport]:
         """Validate and clean OHLCV data with detailed reporting."""
         if df.empty:
             report = DataQualityReport(0, 0, {}, 0, 0, 0, {}, 0.0, ["No data to validate"])
@@ -52,8 +55,8 @@ class DataValidator:
             issues.append(f"Removed {rows_before_drop - len(df_clean)} rows with NaN values.")
 
         # Apply different validation rules based on instrument type
-        is_index = instrument_type.upper() in ["INDEX", "INDICES", "EQ"] and any(word in symbol.upper() for word in ["NIFTY", "SENSEX", "INDEX"])
-        
+        is_index = instrument_type.upper() in ["INDEX", "INDICES"]
+
         if is_index:
             # For indices: volume can be 0, only check for negative volume and invalid prices
             invalid_condition = (df_clean["close"] <= 0) | (df_clean["volume"] < 0)
@@ -62,7 +65,7 @@ class DataValidator:
             # For stocks/other instruments: volume should be positive for valid trading
             invalid_condition = (df_clean["close"] <= 0) | (df_clean["volume"] <= 0)
             validation_msg = "invalid price (<=0) or non-positive volume"
-            
+
         invalid_price_volume_count = invalid_condition.sum()
         if invalid_price_volume_count > 0:
             df_clean = df_clean[~invalid_condition]
@@ -74,8 +77,8 @@ class DataValidator:
             df_clean = df_clean[~high_low_violation]
             issues.append(f"Removed {high_low_violation_count} rows where high < low.")
 
-        df_clean["high"] = df_clean[["open", "close", "high"]].max(axis=1)
-        df_clean["low"] = df_clean[["open", "close", "low"]].min(axis=1)
+        df_clean["high"] = df_clean[["open", "high", "close"]].max(axis=1)
+        df_clean["low"] = df_clean[["open", "low", "close"]].min(axis=1)
 
         ohlc_violations_count = invalid_price_volume_count + high_low_violation_count
         if ohlc_violations_count > 0:
@@ -97,13 +100,15 @@ class DataValidator:
         outlier_columns = ["open", "high", "low", "close"]
         if not is_index:
             outlier_columns.append("volume")
-            
+
         for col in outlier_columns:
             q1 = df_clean[col].quantile(0.25)
             q3 = df_clean[col].quantile(0.75)
             iqr = q3 - q1
             if iqr > 0:
-                outlier_multiplier = config.data_quality.outlier_detection.iqr_multiplier if config.data_quality and config.data_quality.outlier_detection else 1.5 # Default value
+                if not data_quality_config or not data_quality_config.outlier_detection:
+                    raise ValueError("Data quality outlier detection configuration is required")
+                outlier_multiplier = data_quality_config.outlier_detection.iqr_multiplier
                 lower_bound = q1 - outlier_multiplier * iqr
                 upper_bound = q3 + outlier_multiplier * iqr
                 outliers[col] = int(((df_clean[col] < lower_bound) | (df_clean[col] > upper_bound)).sum())
@@ -115,7 +120,13 @@ class DataValidator:
             issues.append(f"Detected a total of {total_outliers} outliers across OHLCV columns.")
 
         quality_score = DataValidator.calculate_quality_score(
-            initial_rows, len(df_clean), ohlc_violations_count, duplicates, time_gaps_count, total_outliers
+            initial_rows,
+            len(df_clean),
+            ohlc_violations_count,
+            duplicates,
+            time_gaps_count,
+            total_outliers,
+            data_quality_config,
         )
 
         report = DataQualityReport(
@@ -130,9 +141,12 @@ class DataValidator:
             issues=issues,
         )
 
+        if not data_quality_config or not data_quality_config.validation:
+            raise ValueError("Data quality validation configuration is required")
+
         is_valid = (
-            len(df_clean) >= (config.data_quality.validation.min_valid_rows if config.data_quality and config.data_quality.validation else 0)
-            and quality_score >= (config.data_quality.validation.quality_score_threshold if config.data_quality and config.data_quality.validation else 0.0)
+            len(df_clean) >= data_quality_config.validation.min_valid_rows
+            and quality_score >= data_quality_config.validation.quality_score_threshold
         )
         if not is_valid:
             logger.warning(f"Data quality below threshold for {symbol}: {quality_score:.2f}%. Issues: {issues}")
@@ -147,6 +161,7 @@ class DataValidator:
         duplicate_timestamps: int,
         time_gaps: int,
         total_outliers: int,
+        data_quality_config: DataQualityConfig,
     ) -> float:
         """
         Calculate a robust overall data quality score using multiplicative penalties.
@@ -156,25 +171,19 @@ class DataValidator:
             return 0.0
 
         try:
-            if config.data_quality and config.data_quality.penalties:
-                penalties = config.data_quality.penalties
-            else:
-                # Default penalties if config is not available
-                penalties = DataQualityPenaltiesConfig(
-                    outlier_penalty=0.1,
-                    gap_penalty=0.1,
-                    ohlc_violation_penalty=0.1,
-                    duplicate_penalty=0.1
-                )
+            if not data_quality_config or not data_quality_config.penalties:
+                raise ValueError("Data quality penalties configuration is required")
+
+            penalties_config = data_quality_config.penalties
 
             base_score_factor = valid_rows / initial_rows
 
             # Calculate penalty factors as a proportion of issues
-            outlier_penalty = (total_outliers / valid_rows) * penalties.outlier_penalty if valid_rows > 0 else 0
-            gap_penalty = (time_gaps / valid_rows) * penalties.gap_penalty if valid_rows > 0 else 0
+            outlier_penalty = (total_outliers / valid_rows) * penalties_config.outlier_penalty if valid_rows > 0 else 0
+            gap_penalty = (time_gaps / valid_rows) * penalties_config.gap_penalty if valid_rows > 0 else 0
             # Penalties for issues that cause row removal are based on initial rows
-            ohlc_penalty = (ohlc_violations / initial_rows) * penalties.ohlc_violation_penalty
-            duplicate_penalty = (duplicate_timestamps / initial_rows) * penalties.duplicate_penalty
+            ohlc_penalty = (ohlc_violations / initial_rows) * penalties_config.ohlc_violation_penalty
+            duplicate_penalty = (duplicate_timestamps / initial_rows) * penalties_config.duplicate_penalty
 
             # Apply penalties multiplicatively for a more realistic score decay
             final_score_factor = (

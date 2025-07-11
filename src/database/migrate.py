@@ -10,7 +10,10 @@ import time
 from pathlib import Path
 
 from src.database.db_utils import db_manager
+from src.utils.config_loader import ConfigLoader
 from src.utils.logger import LOGGER as logger
+
+queries = ConfigLoader().get_queries()
 
 
 class DatabaseMigrator:
@@ -22,13 +25,7 @@ class DatabaseMigrator:
 
     async def initialize_migration_tracking(self) -> None:
         """Create migration tracking table if it doesn't exist."""
-        create_migrations_table = """
-            CREATE TABLE IF NOT EXISTS schema_migrations (
-                version VARCHAR(50) PRIMARY KEY,
-                executed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                execution_time_ms INTEGER NOT NULL
-            );
-        """
+        create_migrations_table = queries.migrate["create_migrations_table"]
 
         async with self.db_manager.get_connection() as conn:
             await conn.execute(create_migrations_table)
@@ -36,7 +33,7 @@ class DatabaseMigrator:
 
     async def get_applied_migrations(self) -> set[str]:
         """Get list of already applied migrations."""
-        query = "SELECT version FROM schema_migrations ORDER BY executed_at"
+        query = queries.migrate["get_applied_migrations"]
 
         async with self.db_manager.get_connection() as conn:
             rows = await conn.fetch(query)
@@ -75,7 +72,7 @@ class DatabaseMigrator:
                 # Record successful migration
                 execution_time = int((time.monotonic() - start_time) * 1000)
                 await conn.execute(
-                    "INSERT INTO schema_migrations (version, execution_time_ms) VALUES ($1, $2)",
+                    queries.migrate["insert_migration"],
                     version,
                     execution_time,
                 )

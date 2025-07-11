@@ -31,11 +31,11 @@ dependencies = [
     
     # Logging & Monitoring
     "loguru>=0.7.3", # Updated from 0.7.2 to 0.7.3
+    "prometheus-client>=0.19.0", # Added for metrics
     
     # Technical Analysis
-    "ta-lib>=0.4.25", # No newer version found (Note: ta-lib often requires manual installation/binaries)
+    "ta-lib", # No newer version found (Note: ta-lib often requires manual installation/binaries)
     "numba>=0.61.2", # Updated from 0.58.0 to 0.61.2
-    
     # Performance & Memory
     "psutil>=5.9.0", # No newer version found
     "pyarrow>=14.0.0", # No newer version found
@@ -82,6 +82,7 @@ dev = [
     "plotly>=5.17.0", # No newer version found
     "seaborn>=0.12.0", # No newer version found
     "matplotlib>=3.10.3", # Updated from 3.8.0 to 3.10.3
+    "optuna>=3.5.0",
     
     # Documentation
     "mkdocs>=1.6.1", # Updated from 1.5.0 to 1.6.1

@@ -11,23 +11,26 @@ from src.utils.logger import LOGGER as logger
 # Load configuration for tests
 config = config_loader.get_config()
 
+
 @pytest.fixture
 def mock_kite_connect():
     """
     Fixture to mock KiteConnect for authenticator tests.
     """
-    with patch('src.auth.authenticator.KiteConnect') as MockKiteConnect:
+    with patch("src.auth.authenticator.KiteConnect") as MockKiteConnect:
         mock_instance = MockKiteConnect.return_value
         yield mock_instance
+
 
 @pytest.fixture
 def mock_token_manager():
     """
     Fixture to mock TokenManager for authenticator tests.
     """
-    with patch('src.auth.authenticator.TokenManager') as MockTokenManager:
+    with patch("src.auth.authenticator.TokenManager") as MockTokenManager:
         mock_instance = MockTokenManager.return_value
         yield mock_instance
+
 
 @pytest.mark.asyncio
 async def test_generate_login_url(mock_kite_connect):
@@ -44,6 +47,7 @@ async def test_generate_login_url(mock_kite_connect):
     mock_kite_connect.login_url.assert_called_once()
     logger.info("test_generate_login_url completed successfully.")
 
+
 @pytest.mark.asyncio
 async def test_generate_session_success(mock_kite_connect, mock_token_manager):
     """
@@ -56,8 +60,11 @@ async def test_generate_session_success(mock_kite_connect, mock_token_manager):
     access_token = authenticator.generate_session("mock_request_token")
 
     assert access_token == "mock_access_token"
-    mock_kite_connect.generate_session.assert_called_once_with("mock_request_token", api_secret=config.broker.api_secret)
+    mock_kite_connect.generate_session.assert_called_once_with(
+        "mock_request_token", api_secret=config.broker.api_secret
+    )
     logger.info("test_generate_session_success completed successfully.")
+
 
 @pytest.mark.asyncio
 async def test_authenticate_success(mock_kite_connect, mock_token_manager):
@@ -74,6 +81,7 @@ async def test_authenticate_success(mock_kite_connect, mock_token_manager):
     mock_token_manager.set_access_token.assert_called_once_with("mock_access_token")
     logger.info("test_authenticate_success completed successfully.")
 
+
 @pytest.mark.asyncio
 async def test_authenticate_token_exception(mock_kite_connect, mock_token_manager):
     """
@@ -87,6 +95,7 @@ async def test_authenticate_token_exception(mock_kite_connect, mock_token_manage
         authenticator.authenticate("mock_request_token")
     mock_token_manager.set_access_token.assert_not_called()
     logger.info("test_authenticate_token_exception completed successfully.")
+
 
 @pytest.mark.asyncio
 async def test_authenticate_value_error():

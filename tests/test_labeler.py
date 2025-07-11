@@ -15,6 +15,7 @@ config = config_loader.get_config()
 # Configure logging for the test file
 logging.basicConfig(level=getattr(logging, config.logging.level), format=config.logging.format)
 
+
 async def test_labeler_functionality():
     """
     Tests the functionality of the OptimizedTripleBarrierLabeler with sample data.

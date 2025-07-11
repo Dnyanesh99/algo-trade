@@ -10,14 +10,14 @@ from pydantic import BaseModel, Field
 from src.core.candle_validator import CandleValidator
 from src.database.models import OHLCVData
 from src.database.ohlcv_repo import OHLCVRepository
+from src.metrics import metrics_registry
 from src.state.error_handler import ErrorHandler
 from src.state.health_monitor import HealthMonitor
-from src.utils.config_loader import config_loader
+from src.utils.config_loader import ConfigLoader
 from src.utils.logger import LOGGER as logger
-from src.utils.performance_metrics import PerformanceMetrics
 
 # Load configuration
-config = config_loader.get_config()
+config = ConfigLoader().get_config()
 
 
 class AggregationResult(BaseModel):
@@ -53,13 +53,11 @@ class HistoricalAggregator:
         ohlcv_repo: OHLCVRepository,
         error_handler: ErrorHandler,
         health_monitor: HealthMonitor,
-        performance_metrics: PerformanceMetrics,
     ):
         # Core dependencies
         self.ohlcv_repo = ohlcv_repo
         self.error_handler = error_handler
         self.health_monitor = health_monitor
-        self.performance_metrics = performance_metrics
         self.candle_validator = CandleValidator()
 
         # Configuration from config.yaml
@@ -110,7 +108,17 @@ class HistoricalAggregator:
             for tf in self.timeframes:
                 tf_result = await self._process_timeframe_aggregation(instrument_id, df_prepared, tf)
                 results.append(tf_result)
-                # self.performance_metrics.record_aggregation_result(tf_result)
+
+                # Record aggregation metrics
+                metrics_registry.observe_histogram(
+                    "candle_aggregation_duration_seconds",
+                    tf_result.processing_time_ms / 1000,
+                    {"timeframe": tf_result.timeframe},
+                )
+                metrics_registry.increment_counter(
+                    "candle_aggregation_total",
+                    {"timeframe": tf_result.timeframe, "status": "success" if tf_result.success else "failure"},
+                )
 
             # Log summary
             successful_results = [r for r in results if r.success]
@@ -145,7 +153,7 @@ class HistoricalAggregator:
     async def _prepare_input_data(self, one_min_data: pd.DataFrame, instrument_id: int) -> Optional[pd.DataFrame]:
         """Prepare and validate input 1-minute data."""
         try:
-            required_columns = ["date", "open", "high", "low", "close", "volume"]
+            required_columns = config.data_quality.validation.required_columns
             missing_columns = [col for col in required_columns if col not in one_min_data.columns]
             if missing_columns:
                 await self.error_handler.handle_error(
@@ -196,23 +204,13 @@ class HistoricalAggregator:
         try:
             logger.info(f"Aggregating to {timeframe_str} for instrument {instrument_id}")
             # Build aggregation dict based on available columns
-            agg_dict = {
-                "open": "first", 
-                "high": "max", 
-                "low": "min", 
-                "close": "last", 
-                "volume": "sum"
-            }
-            
+            agg_dict = {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
+
             # Only include 'oi' if it exists in the dataframe
             if "oi" in df_prepared.columns:
                 agg_dict["oi"] = "last"
-            
-            aggregated_df = (
-                df_prepared.resample(timeframe_str)
-                .agg(agg_dict)
-                .dropna()
-            )
+
+            aggregated_df = df_prepared.resample(timeframe_str, on="timestamp").agg(agg_dict).dropna()
 
             if aggregated_df.empty:
                 processing_time = (datetime.now() - tf_start_time).total_seconds() * 1000

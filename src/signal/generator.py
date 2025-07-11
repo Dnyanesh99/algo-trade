@@ -5,10 +5,12 @@ from src.database.models import SignalData
 from src.database.signal_repo import SignalRepository
 from src.state.error_handler import ErrorHandler
 from src.state.health_monitor import HealthMonitor
-from src.state.position_tracker import PositionTracker
-from src.utils.config_loader import config_loader
+from src.utils.config_loader import ConfigLoader
 from src.utils.logger import LOGGER as logger
-from src.utils.performance_metrics import PerformanceMetrics
+
+config_loader = ConfigLoader()
+
+# PerformanceMetrics module was removed - using metrics registry instead
 
 config = config_loader.get_config()
 
@@ -22,18 +24,14 @@ class SignalGenerator:
     def __init__(
         self,
         signal_repo: SignalRepository,
-        position_tracker: PositionTracker,
         error_handler: ErrorHandler,
         health_monitor: HealthMonitor,
-        performance_metrics: PerformanceMetrics,
         on_signal_generated: Callable[[dict[str, Any]], Any],
     ):
         assert config.signal_generation is not None
         self.signal_repo = signal_repo
-        self.position_tracker = position_tracker
         self.error_handler = error_handler
         self.health_monitor = health_monitor
-        self.performance_metrics = performance_metrics
         self.on_signal_generated = on_signal_generated
 
         self.signal_config = config.signal_generation
@@ -72,7 +70,7 @@ class SignalGenerator:
         direction: str = "Neutral"
 
         try:
-            start_time = self.performance_metrics.start_timer("signal_generator")
+            # Performance metrics moved to metrics registry
 
             if prediction == 1 and confidence_score >= self.signal_config.buy_threshold:
                 signal_type = "Entry"
@@ -104,18 +102,16 @@ class SignalGenerator:
                 signal_data_dict = signal_data_model.model_dump()
                 await self.on_signal_generated(signal_data_dict)
 
-                self.performance_metrics.stop_timer("signal_generator", start_time, True)
+                # Performance metrics moved to metrics registry
                 return signal_data_dict
             logger.info(
                 f"No actionable signal generated for {instrument_id} (Hold). Confidence: {confidence_score:.2f}"
             )
-            self.performance_metrics.stop_timer("signal_generator", start_time, True)
+            # Performance metrics moved to metrics registry
             return None
 
         except Exception as e:
-            # Ensure start_time is defined even if an error occurs before it's set
-            if "start_time" not in locals():
-                start_time = self.performance_metrics.start_timer("signal_generator")  # Fallback
+            # Performance metrics moved to metrics registry
             await self.error_handler.handle_error(
                 "signal_generator",
                 f"Error generating signal for {instrument_id}: {e}",
@@ -126,5 +122,4 @@ class SignalGenerator:
                     "error": str(e),
                 },
             )
-            self.performance_metrics.stop_timer("signal_generator", start_time, False)
             return None

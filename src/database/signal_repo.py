@@ -3,7 +3,10 @@ from typing import Optional
 
 from src.database.db_utils import db_manager
 from src.database.models import SignalData
+from src.utils.config_loader import ConfigLoader
 from src.utils.logger import LOGGER as logger
+
+queries = ConfigLoader().get_queries()
 
 
 class SignalRepository:
@@ -26,17 +29,7 @@ class SignalRepository:
         Returns:
             str: Command status from the database.
         """
-        query = """
-            INSERT INTO signals (ts, instrument_id, signal_type, direction, confidence_score, source_feature_name, price_at_signal, source_feature_value, details)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-            ON CONFLICT (instrument_id, signal_type, ts) DO UPDATE
-            SET direction = EXCLUDED.direction,
-                confidence_score = EXCLUDED.confidence_score,
-                source_feature_name = EXCLUDED.source_feature_name,
-                price_at_signal = EXCLUDED.price_at_signal,
-                source_feature_value = EXCLUDED.source_feature_value,
-                details = EXCLUDED.details
-        """
+        query = queries.signal_repo["insert_signal"]
         try:
             async with self.db_manager.transaction() as conn:
                 status = await conn.execute(
@@ -65,11 +58,7 @@ class SignalRepository:
         """
         Fetches signals data for a given instrument within a time range, optionally filtered by signal type.
         """
-        query = """
-            SELECT ts, signal_type, direction, confidence_score, source_feature_name, price_at_signal, source_feature_value, details
-            FROM signals
-            WHERE instrument_id = $1 AND ts BETWEEN $2 AND $3
-        """
+        query = queries.signal_repo["get_signals"]
         params = [instrument_id, start_time, end_time]
 
         if signal_type:
@@ -90,13 +79,7 @@ class SignalRepository:
         """
         Fetches the most recent signal history for a given instrument.
         """
-        query = """
-            SELECT ts, signal_type, direction, confidence_score, price_at_signal
-            FROM signals
-            WHERE instrument_id = $1
-            ORDER BY ts DESC
-            LIMIT $2
-        """
+        query = queries.signal_repo["get_signal_history"]
         try:
             rows = await self.db_manager.fetch_rows(query, instrument_id, limit)
             logger.debug(f"Fetched {len(rows)} latest signal records for {instrument_id}.")

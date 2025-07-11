@@ -1,9 +1,11 @@
 import asyncio
+import time
 from typing import Optional
 
 from src.live.candle_buffer import CandleBuffer
 from src.live.tick_queue import TickQueue
 from src.live.tick_validator import TickValidator
+from src.metrics import metrics_registry
 from src.utils.logger import LOGGER as logger
 
 
@@ -31,6 +33,7 @@ class StreamConsumer:
         logger.info("StreamConsumer: Starting tick consumption.")
         while True:
             try:
+                start_time = time.monotonic()
                 tick = await self.tick_queue.get()
                 if tick:
                     # KiteTicker's on_ticks callback already provides parsed ticks.
@@ -42,6 +45,8 @@ class StreamConsumer:
                         logger.warning(f"StreamConsumer: Invalid tick received, skipping: {tick}")
                 else:
                     logger.debug("StreamConsumer: Received None tick, continuing.")
+                duration = time.monotonic() - start_time
+                metrics_registry.observe_histogram("live_tick_processing_duration_seconds", duration)
             except asyncio.CancelledError:
                 logger.info("StreamConsumer: Tick consumption cancelled.")
                 break

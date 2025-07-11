@@ -5,10 +5,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from src.utils.config_loader import config_loader
+from src.metrics import metrics_registry
+from src.utils.config_loader import ConfigLoader
 from src.utils.logger import LOGGER as logger
 
-config = config_loader.get_config()
+config = ConfigLoader().get_config()
 
 
 class CandleBuffer:
@@ -110,17 +111,9 @@ class CandleBuffer:
                                 )
                                 continue
 
-                            required_candle_fields = [
-                                "instrument_token",
-                                "timeframe",
-                                "start_time",
-                                "open",
-                                "high",
-                                "low",
-                                "close",
-                                "volume",
-                                "trades",
-                            ]
+                            if config.live_aggregator is None:
+                                continue
+                            required_candle_fields = config.live_aggregator.required_candle_fields
                             if not all(field in candle_data for field in required_candle_fields):
                                 logger.warning(
                                     f"Persisted candle data for {instrument_token} is incomplete. Skipping: {candle_data}"
@@ -200,6 +193,10 @@ class CandleBuffer:
                     else:
                         logger.info(
                             f"Completed {tf}-min candle for {instrument_token} at {current_candle['start_time']}. Emitting..."
+                        )
+                        metrics_registry.increment_counter(
+                            "live_candle_formation_total",
+                            {"instrument": str(instrument_token), "timeframe": f"{tf}min"},
                         )
                         await self.on_candle_complete_callback(current_candle)
                         # self._persist_state()  # Persistence handled by background task

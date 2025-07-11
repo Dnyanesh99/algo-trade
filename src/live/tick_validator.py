@@ -1,10 +1,11 @@
 from datetime import datetime
 from typing import Any
 
-from src.utils.config_loader import config_loader
+from src.metrics import metrics_registry
+from src.utils.config_loader import ConfigLoader
 from src.utils.logger import LOGGER as logger
 
-config = config_loader.get_config()
+config = ConfigLoader().get_config()
 
 
 class TickValidator:
@@ -13,7 +14,7 @@ class TickValidator:
     """
 
     def __init__(self) -> None:
-        self.lpt_threshold = config.get_data_quality_config().live_data_lpt_threshold
+        self.lpt_threshold = config.data_quality.live_data_lpt_threshold if config.data_quality else 1.0
         self._last_sequence_numbers: dict[int, int] = {}
         logger.info(f"TickValidator initialized with LPT threshold: {self.lpt_threshold}")
 
@@ -32,7 +33,9 @@ class TickValidator:
         # No need for isinstance(tick, dict) check here.
 
         # 1. Check for essential fields
-        required_fields = ["instrument_token", "timestamp", "last_traded_price"]
+        if config.live_aggregator is None:
+            return False
+        required_fields = config.live_aggregator.required_tick_fields
         for field in required_fields:
             if field not in tick:
                 logger.warning(f"Missing required field '{field}' in tick: {tick}")
@@ -97,6 +100,9 @@ class TickValidator:
                 if current_sequence <= last_sequence:
                     logger.warning(
                         f"Out-of-sequence tick for {instrument_token}: current {current_sequence} <= last {last_sequence}. Tick: {tick}"
+                    )
+                    metrics_registry.increment_counter(
+                        "tick_validation_errors_total", {"error_type": "out_of_sequence"}
                     )
                     # Decide whether to drop or process out-of-sequence ticks
                     # For now, we'll drop it as it indicates a data integrity issue

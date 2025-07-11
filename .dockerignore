@@ -1,0 +1,128 @@
+# Version control
+.git
+.gitignore
+.gitattributes
+
+# Python cache and bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+.venv/
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Testing
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+cover/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Documentation
+docs/_build/
+.readthedocs.yml
+*.md
+README*
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Logs and temporary files
+logs/
+*.log
+cache/
+*.tmp
+*.temp
+
+# Data and model artifacts (will be mounted as volumes)
+data/
+models/artifacts/
+*.pkl
+*.joblib
+*.h5
+*.model
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Large binaries and archives
+*.tar
+*.tar.gz
+*.zip
+*.rar
+*.7z
+
+# Compiled TA-Lib (will be built in Docker)
+
+
+# Docker related files
+Dockerfile*
+docker-compose*
+.dockerignore
+
+# Monitoring and development tools
+monitoring/
+.github/
+scripts/
+tools/
+
+# Package manager files
+*.lock
+poetry.lock
+Pipfile.lock
+
+# System files
+.bashrc
+.profile
+.bash_history

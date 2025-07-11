@@ -4,17 +4,14 @@ Handles market hours, readiness checks, and precise timing for predictions.
 """
 
 import asyncio
-import threading
-from datetime import datetime, time, timedelta
+from datetime import datetime, timedelta
 from typing import Any, Callable, Optional
 
 from src.state.system_state import SystemState
-from src.utils.config_loader import config_loader
+from src.utils.config_loader import SchedulerConfig
 from src.utils.logger import LOGGER as logger
 from src.utils.market_calendar import MarketCalendar
-
-# Load configuration
-config = config_loader.get_config()
+from src.utils.time_helper import get_next_candle_boundary
 
 
 class Scheduler:
@@ -33,25 +30,24 @@ class Scheduler:
         market_calendar: MarketCalendar,
         system_state: SystemState,
         prediction_pipeline_callback: Callable,
+        scheduler_config: SchedulerConfig,
     ):
+        if not scheduler_config:
+            raise ValueError("Scheduler configuration is required")
+
         self.market_calendar = market_calendar
         self.system_state = system_state
         self.prediction_pipeline_callback = prediction_pipeline_callback
 
         # Configuration-driven parameters
-        if config.scheduler:
-            self.candle_interval_minutes = config.scheduler.prediction_interval_minutes
-            self.readiness_check_time = datetime.strptime(config.scheduler.readiness_check_time, "%H:%M").time()
-        else:
-            logger.warning("Scheduler configuration not found. Using default values.")
-            self.candle_interval_minutes = 15  # Default
-            self.readiness_check_time = time(9, 30) # Default
+        self.candle_interval_minutes = scheduler_config.prediction_interval_minutes
+        self.readiness_check_time = datetime.strptime(scheduler_config.readiness_check_time, "%H:%M").time()
 
         # State management
         self._scheduler_task: Optional[asyncio.Task] = None
         self._last_triggered_candle = -1
         self._is_running = False
-        self._lock = threading.Lock()
+        self._lock = asyncio.Lock()
 
         # Validation
         if self.candle_interval_minutes <= 0:
@@ -85,7 +81,7 @@ class Scheduler:
 
                 else:
                     # Market is open - check readiness
-                    if not self._check_system_readiness(now):
+                    if not await self._check_system_readiness(now):
                         # If not ready, sleep until readiness check time or next minute
                         readiness_dt = now.replace(
                             hour=self.readiness_check_time.hour,
@@ -106,7 +102,7 @@ class Scheduler:
 
                     else:
                         # System is ready, calculate sleep until next candle boundary
-                        next_boundary = self._get_next_candle_boundary_time(now)
+                        next_boundary = get_next_candle_boundary(now, self.candle_interval_minutes)
                         time_to_sleep = (next_boundary - now).total_seconds()
 
                         if time_to_sleep <= 0:
@@ -150,7 +146,7 @@ class Scheduler:
         finally:
             logger.info("Scheduler loop ended")
 
-    def _check_system_readiness(self, now: datetime) -> bool:
+    async def _check_system_readiness(self, now: datetime) -> bool:
         """
         Check if system is ready for predictions.
         """
@@ -161,28 +157,49 @@ class Scheduler:
         # 60-min data availability check
         if not self.system_state.is_60_min_data_available():
             logger.info("Performing 60-min data readiness check...")
-            # TODO: Implement actual database query or state check for 60-min data availability.
-            # This is a critical component for production readiness.
-            # For now, raising an error to ensure it's addressed.
-            # self.system_state.set_60_min_data_available(True) # REMOVE THIS HARDCODED LINE
-            # raise NotImplementedError("60-min data availability check not implemented. This must query the database.")
-            return False  # Temporarily return False until implemented
+
+            try:
+                from src.database.ohlcv_repo import OHLCVRepository
+
+                ohlcv_repo = OHLCVRepository()
+
+                # The lookback period should be sufficient for the model's feature calculation.
+                # Using a hardcoded but reasonable value here.
+                # TODO: Link this to the actual model's lookback requirement from config.
+                required_candles = 100
+                start_time = now - timedelta(hours=required_candles)
+
+                # Use repository method to check data availability
+                candle_count = await ohlcv_repo.check_data_availability("60min", start_time, now)
+
+                # Check if we have sufficient data (e.g., at least 80% of required candles)
+                min_required = int(required_candles * 0.8)
+                is_available = candle_count >= min_required
+
+                logger.info(
+                    f"60-min data check: {candle_count}/{required_candles} candles available, "
+                    f"minimum required: {min_required}, status: {is_available}"
+                )
+
+                # Update system state with the result
+                self.system_state.set_60_min_data_available(is_available)
+                return is_available
+
+            except Exception as e:
+                logger.error(f"Error checking 60-min data availability: {e}")
+                return False
 
         return self.system_state.is_60_min_data_available()
 
     def _should_trigger_prediction(self, now: datetime) -> bool:
         """
         Determine if prediction should be triggered based on timing.
-        Triggers at the last second of the candle interval (e.g., XX:14:59 for 15-min).
+        This is a placeholder and needs to be refined based on FLW-022.
         """
-        # Calculate the minute within the current candle interval
-        minute_in_interval = now.minute % self.candle_interval_minutes
-
-        # The target minute is the last minute of the interval (e.g., 14 for a 15-min candle)
-        target_minute = self.candle_interval_minutes - 1
-
-        # Trigger if we are in the target minute and at least 59 seconds into it
-        return minute_in_interval == target_minute and now.second >= 59
+        # For now, a simple check: trigger at the start of a new candle interval
+        minutes_since_midnight = now.hour * 60 + now.minute
+        current_candle_id = minutes_since_midnight // self.candle_interval_minutes
+        return current_candle_id != self._last_triggered_candle
 
     def _get_current_candle_id(self, now: datetime) -> int:
         """
@@ -192,35 +209,11 @@ class Scheduler:
         minutes_since_midnight = now.hour * 60 + now.minute
         return minutes_since_midnight // self.candle_interval_minutes
 
-    def _get_next_candle_boundary_time(self, now: datetime) -> datetime:
-        """
-        Calculates the exact timestamp of the next candle boundary.
-        For a 15-min candle, if now is 10:05:30, next boundary is 10:15:00.
-        """
-        current_minute = now.minute
-        # Calculate minutes to the next multiple of candle_interval_minutes
-        minutes_to_add = self.candle_interval_minutes - (current_minute % self.candle_interval_minutes)
-
-        # If current_minute is already a multiple of candle_interval_minutes (e.g., 10:15 for 15-min)
-        # and we are exactly at 0 seconds, the next boundary is current time + interval.
-        # Otherwise, if we are past 0 seconds, the next boundary is the current time + interval.
-        if minutes_to_add == self.candle_interval_minutes:
-            minutes_to_add = 0  # This means we are exactly on a boundary, so next boundary is current time + interval
-
-        next_boundary = now.replace(second=0, microsecond=0) + timedelta(minutes=minutes_to_add)
-
-        # If the calculated next_boundary is in the past or exactly now (and we want the *next* one)
-        # and we are not exactly at the start of the current boundary (i.e., seconds > 0 or microseconds > 0)
-        if next_boundary <= now and (now.second > 0 or now.microsecond > 0):
-            next_boundary += timedelta(minutes=self.candle_interval_minutes)
-
-        return next_boundary
-
-    def start(self) -> None:
+    async def start(self) -> None:
         """
         Start the scheduler in a non-blocking way.
         """
-        with self._lock:
+        async with self._lock:
             if self._is_running:
                 logger.warning("Scheduler is already running")
                 return
@@ -237,7 +230,7 @@ class Scheduler:
         """
         Stop the scheduler gracefully.
         """
-        with self._lock:
+        async with self._lock:
             if not self._is_running:
                 logger.warning("Scheduler is not running")
                 return

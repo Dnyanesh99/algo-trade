@@ -1,12 +1,12 @@
+import time
+
 from kiteconnect import KiteConnect
 from kiteconnect.exceptions import KiteException, NetworkException, TokenException
 
 from src.auth.token_manager import TokenManager
-from src.utils.config_loader import config_loader
+from src.metrics import metrics_registry
+from src.utils.config_loader import BrokerConfig
 from src.utils.logger import LOGGER as logger
-
-# Load configuration
-config = config_loader.get_config()
 
 
 class KiteAuthenticator:
@@ -15,9 +15,10 @@ class KiteAuthenticator:
     Handles initial login, request token exchange for access token.
     """
 
-    def __init__(self) -> None:
-        self.redirect_url = config.broker.redirect_url if config.broker and config.broker.redirect_url else ""
-        self.kite = KiteConnect(api_key=config.broker.api_key if config.broker and config.broker.api_key else "")
+    def __init__(self, broker_config: BrokerConfig) -> None:
+        self.broker_config = broker_config
+        self.redirect_url = broker_config.redirect_url
+        self.kite = KiteConnect(api_key=broker_config.api_key)
         self.token_manager = TokenManager()
 
     def set_redirect_url(self, new_url: str) -> None:
@@ -46,16 +47,23 @@ class KiteAuthenticator:
         """
         Exchanges the request token for an access token.
         """
+        start_time = time.monotonic()
         try:
-            data = self.kite.generate_session(request_token, api_secret=config.broker.api_secret if config.broker and config.broker.api_secret else "")
+            data = self.kite.generate_session(request_token, self.broker_config.api_secret)
             access_token: str = data["access_token"]
+
+            # Record successful authentication metrics
+            duration = time.monotonic() - start_time
+            metrics_registry.record_auth_request("generate_session", True, duration)
+
             logger.info("Successfully generated KiteConnect session and retrieved access token.")
             return access_token
-        except TokenException as e:
-            logger.error(f"Token error generating session: {e}")
-            raise
-        except NetworkException as e:
-            logger.error(f"Network error generating session: {e}")
+        except (TokenException, NetworkException) as e:
+            # Record failed authentication metrics
+            duration = time.monotonic() - start_time
+            metrics_registry.record_auth_request("generate_session", False, duration)
+
+            logger.error(f"Error generating session: {e}")
             raise
         except KiteException as e:
             logger.error(f"KiteConnect error generating session: {e}")

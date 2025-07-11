@@ -1,0 +1,56 @@
+# Development Dockerfile with hot reloading
+FROM python:3.11-slim
+
+# Set environment variables for development
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONPATH=/app \
+    DEVELOPMENT=1
+
+# Install system dependencies including watchdog for file monitoring
+RUN apt-get update && apt-get install -y \
+    postgresql-client \
+    curl \
+    inotify-tools \
+    libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create app directory
+WORKDIR /app
+
+# Upgrade pip and install development packages
+RUN pip install --upgrade pip setuptools wheel
+
+# Install watchdog for file monitoring
+RUN pip install watchdog[watchmedo]
+
+# Copy requirements and install Python dependencies
+COPY pyproject.toml .
+COPY src ./src
+
+# Install Python dependencies without TA-lib (for faster builds)
+RUN pip install -e . --no-deps && \
+    pip install pandas numpy scipy scikit-learn lightgbm joblib \
+    pydantic pydantic-settings pyyaml psycopg2-binary asyncpg sqlalchemy \
+    loguru prometheus-client numba psutil pyarrow httpx websockets \
+    aiofiles Flask pytz orjson tqdm typer kiteconnect
+
+# Create necessary directories
+RUN mkdir -p logs cache models/artifacts config
+
+# Create non-root user for security with matching UID/GID
+RUN groupadd -r appuser -g 1000 && useradd -r -g appuser -u 1000 appuser && \
+    chown -R appuser:appuser /app
+
+# Switch to non-root user
+USER appuser
+
+# Expose ports
+EXPOSE 8000 8001
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD python -c "import sys; sys.exit(0)" || exit 1
+
+# Use watchmedo for auto-restart on file changes
+CMD ["watchmedo", "auto-restart", "--directory=/app", "--pattern=*.py", "--recursive", "--", "python", "main.py"]

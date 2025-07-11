@@ -123,8 +123,7 @@ dmypy.json
 
 # Trading-specific ignores
 # API Keys and secrets
-config/config.yaml
-config/rate_limit_config.yaml
+
 *.key
 *.secret
 api_keys.txt
@@ -196,6 +195,11 @@ coverage.xml
 # TA-Lib build artifacts
 ta-lib/
 
+config/config.yaml
+GEMINI.md
+CLAUDE.md
+review.txt
+README.dev.md
 
 # Documentation files                                                                                                             │
 docs/ZerodhaKiteConnect.txt

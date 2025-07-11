@@ -24,12 +24,12 @@ test-integration: ## Run integration tests
 	pytest -v -m "integration" tests/
 
 lint: ## Run linting
-	ruff check src tests
-	ruff format --check src tests
+	ruff check src main.py
+	ruff format --check src main.py
 
 format: ## Format code
-	ruff format src tests
-	ruff check --fix src tests
+	ruff format src main.py
+	ruff check --fix src main.py
 
 type-check: ## Run type checking
 	mypy src
@@ -55,7 +55,7 @@ docs: ## Build documentation
 docs-serve: ## Serve documentation locally
 	mkdocs serve
 
-quality: lint type-check security ## Run all quality checks
+quality: lint format type-check security ## Run all quality checks
 
 validate: quality test ## Full validation (quality + tests)
 

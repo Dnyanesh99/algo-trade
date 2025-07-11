@@ -2,8 +2,8 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
 from main import main_async
+
 from src.utils.config_loader import config_loader
 from src.utils.logger import LOGGER as logger
 
@@ -56,20 +56,20 @@ async def test_main_async_live_mode_success():
     """
     logger.info("\n--- Starting test_main_async_live_mode_success ---")
 
-    with patch('main.KiteAuthenticator') as MockAuthenticator,
-         patch('main.TokenManager') as MockTokenManager,
-         patch('main.KiteRESTClient') as MockRESTClient,
-         patch('main.InstrumentRepo') as MockInstrumentRepo,
-         patch('main.InstrumentManager') as MockInstrumentManager,
-         patch('main.SystemState') as MockSystemState,
-         patch('main.MarketCalendar') as MockMarketCalendar,
-         patch('main.TimeSynchronizer') as MockTimeSynchronizer,
-         patch('main.TickQueue') as MockTickQueue,
-         patch('main.TickValidator') as MockTickValidator,
-         patch('main.CandleBuffer') as MockCandleBuffer,
-         patch('main.StreamConsumer') as MockStreamConsumer,
-         patch('main.KiteWebSocketClient') as MockWebSocketClient,
-         patch('main.Scheduler') as MockScheduler,
+    with patch('main.KiteAuthenticator') as MockAuthenticator, \
+         patch('main.TokenManager') as MockTokenManager, \
+         patch('main.KiteRESTClient') as MockRESTClient, \
+         patch('main.InstrumentRepo') as MockInstrumentRepo, \
+         patch('main.InstrumentManager') as MockInstrumentManager, \
+         patch('main.SystemState') as MockSystemState, \
+         patch('main.MarketCalendar') as MockMarketCalendar, \
+         patch('main.TimeSynchronizer') as MockTimeSynchronizer, \
+         patch('main.TickQueue') as MockTickQueue, \
+         patch('main.TickValidator') as MockTickValidator, \
+         patch('main.CandleBuffer') as MockCandleBuffer, \
+         patch('main.StreamConsumer') as MockStreamConsumer, \
+         patch('main.KiteWebSocketClient') as MockWebSocketClient, \
+         patch('main.Scheduler') as MockScheduler, \
          patch('main.config') as MockConfig:
 
         # Configure mocks
@@ -131,20 +131,20 @@ async def test_main_async_live_mode_websocket_fail():
     """
     logger.info("\n--- Starting test_main_async_live_mode_websocket_fail ---")
 
-    with patch('main.KiteAuthenticator') as MockAuthenticator,
-         patch('main.TokenManager') as MockTokenManager,
-         patch('main.KiteRESTClient') as MockRESTClient,
-         patch('main.InstrumentRepo') as MockInstrumentRepo,
-         patch('main.InstrumentManager') as MockInstrumentManager,
-         patch('main.SystemState') as MockSystemState,
-         patch('main.MarketCalendar') as MockMarketCalendar,
-         patch('main.TimeSynchronizer') as MockTimeSynchronizer,
-         patch('main.TickQueue') as MockTickQueue,
-         patch('main.TickValidator') as MockTickValidator,
-         patch('main.CandleBuffer') as MockCandleBuffer,
-         patch('main.StreamConsumer') as MockStreamConsumer,
-         patch('main.KiteWebSocketClient') as MockWebSocketClient,
-         patch('main.Scheduler') as MockScheduler,
+    with patch('main.KiteAuthenticator') as MockAuthenticator, \
+         patch('main.TokenManager') as MockTokenManager, \
+         patch('main.KiteRESTClient') as MockRESTClient, \
+         patch('main.InstrumentRepo') as MockInstrumentRepo, \
+         patch('main.InstrumentManager') as MockInstrumentManager, \
+         patch('main.SystemState') as MockSystemState, \
+         patch('main.MarketCalendar') as MockMarketCalendar, \
+         patch('main.TimeSynchronizer') as MockTimeSynchronizer, \
+         patch('main.TickQueue') as MockTickQueue, \
+         patch('main.TickValidator') as MockTickValidator, \
+         patch('main.CandleBuffer') as MockCandleBuffer, \
+         patch('main.StreamConsumer') as MockStreamConsumer, \
+         patch('main.KiteWebSocketClient') as MockWebSocketClient, \
+         patch('main.Scheduler') as MockScheduler, \
          patch('main.config') as MockConfig:
 
         # Configure mocks

@@ -10,25 +10,29 @@ from src.utils.logger import LOGGER as logger
 # Load configuration for tests
 config = config_loader.get_config()
 
+
 @pytest.fixture
 def mock_token_manager():
-    with patch('src.broker.rest_client.TokenManager') as MockTokenManager:
+    with patch("src.broker.rest_client.TokenManager") as MockTokenManager:
         mock_instance = MockTokenManager.return_value
         yield mock_instance
 
+
 @pytest.fixture
 def mock_kite_connect():
-    with patch('src.broker.rest_client.KiteConnect') as MockKiteConnect:
+    with patch("src.broker.rest_client.KiteConnect") as MockKiteConnect:
         mock_instance = MockKiteConnect.return_value
         yield mock_instance
 
+
 @pytest.fixture
 def mock_rate_limiter():
-    with patch('src.broker.rest_client.RateLimiter') as MockRateLimiter:
+    with patch("src.broker.rest_client.RateLimiter") as MockRateLimiter:
         mock_instance = MockRateLimiter.return_value
         mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
         mock_instance.__aexit__ = AsyncMock(return_value=None)
         yield mock_instance
+
 
 @pytest.mark.asyncio
 async def test_initialize_kite_client_with_token(mock_token_manager, mock_kite_connect):
@@ -38,6 +42,7 @@ async def test_initialize_kite_client_with_token(mock_token_manager, mock_kite_c
     mock_kite_connect.assert_called_once_with(api_key=config.broker.api_key, access_token="test_access_token")
     logger.info("test_initialize_kite_client_with_token completed successfully.")
 
+
 @pytest.mark.asyncio
 async def test_initialize_kite_client_without_token(mock_token_manager, mock_kite_connect):
     logger.info("\n--- Starting test_initialize_kite_client_without_token ---")
@@ -45,6 +50,7 @@ async def test_initialize_kite_client_without_token(mock_token_manager, mock_kit
     client = KiteRESTClient()
     mock_kite_connect.assert_called_once_with(api_key=config.broker.api_key)
     logger.info("test_initialize_kite_client_without_token completed successfully.")
+
 
 @pytest.mark.asyncio
 async def test_update_access_token(mock_token_manager, mock_kite_connect):
@@ -57,6 +63,7 @@ async def test_update_access_token(mock_token_manager, mock_kite_connect):
     client._update_access_token()
     client.kite.set_access_token.assert_called_once_with("new_token")
     logger.info("test_update_access_token completed successfully.")
+
 
 @pytest.mark.asyncio
 async def test_get_historical_data(mock_token_manager, mock_kite_connect, mock_rate_limiter):
@@ -73,9 +80,12 @@ async def test_get_historical_data(mock_token_manager, mock_kite_connect, mock_r
     data = await client.get_historical_data(instrument_token, from_date, to_date, interval)
 
     assert data == [{"date": "2023-01-01", "open": 100}]
-    mock_kite_connect.historical_data.assert_called_once_with(instrument_token, from_date, to_date, interval, continuous=False, ohlc=True)
+    mock_kite_connect.historical_data.assert_called_once_with(
+        instrument_token, from_date, to_date, interval, continuous=False, ohlc=True
+    )
     mock_rate_limiter.__aenter__.assert_called_once()
     logger.info("test_get_historical_data completed successfully.")
+
 
 @pytest.mark.asyncio
 async def test_get_instruments(mock_token_manager, mock_kite_connect, mock_rate_limiter):

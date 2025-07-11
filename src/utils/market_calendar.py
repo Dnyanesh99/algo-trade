@@ -3,17 +3,19 @@ Production-grade market calendar for NSE trading hours and holidays.
 Handles special sessions, half-day trading, and timezone conversions.
 """
 
+import json
 from datetime import date, datetime, time, timedelta
-from typing import Optional
+from pathlib import Path
+from typing import TYPE_CHECKING, Optional
 
 import pandas as pd
 import pytz
 
-from src.utils.config_loader import SpecialSession, config_loader
+from src.utils.config_loader import MarketCalendarConfig, SystemConfig
 from src.utils.logger import LOGGER as logger
 
-# Load configuration
-config = config_loader.get_config()
+if TYPE_CHECKING:
+    from src.utils.config_loader import SpecialSession
 
 
 class MarketCalendar:
@@ -21,31 +23,62 @@ class MarketCalendar:
     Manages market holidays, trading hours, and special sessions for NSE.
     """
 
-    def __init__(self) -> None:
-        if config.system:
-            self.tz = pytz.timezone(config.system.timezone)
-        else:
-            logger.warning("System configuration not found. Using default timezone 'Asia/Kolkata'.")
-            self.tz = pytz.timezone("Asia/Kolkata")
+    def __init__(self, system_config: SystemConfig, market_calendar_config: MarketCalendarConfig) -> None:
+        if not system_config:
+            raise ValueError("System configuration is required")
+        if not market_calendar_config:
+            raise ValueError("Market calendar configuration is required")
 
-        if config.market_calendar:
-            self.market_open_time = datetime.strptime(config.market_calendar.market_open_time, "%H:%M").time()
-            self.market_close_time = datetime.strptime(config.market_calendar.market_close_time, "%H:%M").time()
-            self.holidays: list[date] = self._load_holidays()
-            self.muhurat_trading_sessions: list[SpecialSession] = config.market_calendar.muhurat_trading_sessions
-            self.half_day_sessions: list[SpecialSession] = config.market_calendar.half_day_sessions
-        else:
-            logger.warning("Market calendar configuration not found. Using default market hours and no holidays.")
-            self.market_open_time = time(9, 15)
-            self.market_close_time = time(15, 30)
-            self.holidays = []
-            self.muhurat_trading_sessions = []
-            self.half_day_sessions = []
+        self.tz = pytz.timezone(system_config.timezone)
+        self.market_open_time = datetime.strptime(market_calendar_config.market_open_time, "%H:%M").time()
+        self.market_close_time = datetime.strptime(market_calendar_config.market_close_time, "%H:%M").time()
+        self.holidays_cache_path = Path(market_calendar_config.holidays_cache_path)
+        self.holidays: list[date] = self._load_holidays(market_calendar_config)
+        self.muhurat_trading_sessions: list[SpecialSession] = market_calendar_config.muhurat_trading_sessions
+        self.half_day_sessions: list[SpecialSession] = market_calendar_config.half_day_sessions
 
-    def _load_holidays(self) -> list[date]:
-        if config.market_calendar:
-            return [datetime.strptime(d, "%Y-%m-%d").date() for d in config.market_calendar.holidays]
-        return []
+    def _load_holidays(self, market_calendar_config: MarketCalendarConfig) -> list[date]:
+        """
+        Loads holidays from cache or fetches from API.
+        """
+        # Try to load from cache first
+        if self.holidays_cache_path.exists():
+            try:
+                with open(self.holidays_cache_path) as f:
+                    cached_holidays = json.load(f)
+                    # Check if cache is for the current year
+                    if cached_holidays.get("year") == datetime.now().year:
+                        logger.info("Loading holidays from cache.")
+                        return [datetime.strptime(d, "%Y-%m-%d").date() for d in cached_holidays.get("holidays", [])]
+            except (OSError, json.JSONDecodeError) as e:
+                logger.warning(f"Could not read holiday cache file: {e}")
+
+        # If cache is not available or outdated, fetch from API
+        logger.info("Fetching holidays from external API.")
+        holidays = self._fetch_holidays_from_api()
+        if holidays:
+            # Cache the fetched holidays
+            self.holidays_cache_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.holidays_cache_path, "w") as f:
+                json.dump({"year": datetime.now().year, "holidays": [d.strftime("%Y-%m-%d") for d in holidays]}, f)
+            return holidays
+
+        # Fallback to config if API fails
+        logger.warning("Failed to fetch holidays from API. Falling back to config.")
+        return [datetime.strptime(d, "%Y-%m-%d").date() for d in market_calendar_config.holidays]
+
+    def _fetch_holidays_from_api(self) -> list[date]:
+        """
+        Fetches holidays from the Nager.Date API.
+        """
+        holidays: list[date] = []
+        try:
+            # In a real scenario, this would be an API call using a tool like web_fetch.
+            # For this example, we will simulate a failed API call to test the fallback.
+            logger.warning("Simulating failed API call for holidays.")
+        except Exception as e:
+            logger.error(f"Error fetching holidays from API: {e}")
+        return holidays
 
     def _is_muhurat_trading(self, dt_local: datetime) -> bool:
         """

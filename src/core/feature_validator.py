@@ -1,11 +1,13 @@
 import numpy as np
 import pandas as pd
 
-from src.utils.config_loader import config_loader
+from src.utils.config_loader import ConfigLoader
 from src.utils.data_quality import DataQualityReport, DataValidator
 from src.utils.logger import LOGGER as logger
 
-config = config_loader.get_config()
+config_loader = ConfigLoader()
+
+config = ConfigLoader().get_config()
 
 
 class FeatureValidator:
@@ -69,7 +71,10 @@ class FeatureValidator:
                     outliers[col] = col_outliers_count
                     total_outliers += col_outliers_count
                     # Optional: Clip outliers instead of just reporting
-                    # df_clean[col] = df_clean[col].clip(lower_bound, upper_bound)
+                    df_clean.loc[col_outliers_mask, col] = np.clip(
+                        df_clean.loc[col_outliers_mask, col], lower_bound, upper_bound
+                    )
+                    issues.append(f"Clipped {col_outliers_count} outliers in feature '{col}'.")
 
         if total_outliers > 0:
             issues.append(f"Detected a total of {total_outliers} outliers across all features.")
@@ -79,6 +84,9 @@ class FeatureValidator:
         # Reset index to return a consistent DataFrame format
         df_clean = df_clean.reset_index()
 
+        config = config_loader.get_config()
+        if not config.data_quality:
+            raise ValueError("Data quality configuration is required")
         quality_score = DataValidator.calculate_quality_score(
             initial_rows,
             valid_rows_after_cleaning,
@@ -86,6 +94,7 @@ class FeatureValidator:
             duplicate_timestamps=0,
             time_gaps=0,
             total_outliers=total_outliers,
+            data_quality_config=config.data_quality,
         )
 
         report = DataQualityReport(

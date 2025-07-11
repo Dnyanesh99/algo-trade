@@ -10,14 +10,16 @@ from src.utils.logger import LOGGER as logger
 # Load configuration for tests
 config = config_loader.get_config()
 
+
 @pytest.fixture
 def mock_websocket_client():
-    with patch('src.broker.connection_manager.KiteWebSocketClient') as MockKiteWebSocketClient:
+    with patch("src.broker.connection_manager.KiteWebSocketClient") as MockKiteWebSocketClient:
         mock_instance = MockKiteWebSocketClient.return_value
         mock_instance.is_connected.return_value = True
         mock_instance.connect = AsyncMock()
         mock_instance.disconnect = AsyncMock()
         yield mock_instance
+
 
 @pytest.mark.asyncio
 async def test_connection_manager_init(mock_websocket_client):
@@ -32,6 +34,7 @@ async def test_connection_manager_init(mock_websocket_client):
     mock_websocket_client.on_noreconnect_callback = manager._on_noreconnect_from_kws
     logger.info("test_connection_manager_init completed successfully.")
 
+
 @pytest.mark.asyncio
 async def test_start_stop_monitoring(mock_websocket_client):
     logger.info("\n--- Starting test_start_stop_monitoring ---")
@@ -44,9 +47,10 @@ async def test_start_stop_monitoring(mock_websocket_client):
     assert not manager._monitor_task.done()
 
     manager.stop_monitoring()
-    await asyncio.sleep(0.1) # Give task a chance to cancel
+    await asyncio.sleep(0.1)  # Give task a chance to cancel
     assert manager._monitor_task.done()
     logger.info("test_start_stop_monitoring completed successfully.")
+
 
 @pytest.mark.asyncio
 async def test_monitor_connection_disconnected(mock_websocket_client):
@@ -58,11 +62,12 @@ async def test_monitor_connection_disconnected(mock_websocket_client):
     mock_websocket_client.is_connected.return_value = False
 
     # Run monitor once
-    with patch('src.broker.connection_manager.asyncio.sleep', new=AsyncMock()):
+    with patch("src.broker.connection_manager.asyncio.sleep", new=AsyncMock()):
         await manager._monitor_connection()
 
     on_noreconnect_critical.assert_called_once()
     logger.info("test_monitor_connection_disconnected completed successfully.")
+
 
 @pytest.mark.asyncio
 async def test_on_reconnect_from_kws(mock_websocket_client):
@@ -74,6 +79,7 @@ async def test_on_reconnect_from_kws(mock_websocket_client):
     manager._on_reconnect_from_kws(1)
     on_data_gap_detected.assert_called_once()
     logger.info("test_on_reconnect_from_kws completed successfully.")
+
 
 @pytest.mark.asyncio
 async def test_on_noreconnect_from_kws(mock_websocket_client):

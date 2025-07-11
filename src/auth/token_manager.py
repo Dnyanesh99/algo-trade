@@ -1,12 +1,10 @@
 import json
+import os
 import threading
 from pathlib import Path
 from typing import Optional
 
-from src.utils.config_loader import config_loader
 from src.utils.logger import LOGGER as logger
-
-config = config_loader.get_config()
 
 
 class TokenManager:
@@ -26,7 +24,10 @@ class TokenManager:
             if cls._instance is None:
                 cls._instance = super().__new__(cls)
                 cls._instance._access_token = None
-                cls._instance._token_file_path = Path(config.broker.token_file_path)
+
+                # Get token file path from environment variable with default
+                token_file_path = os.getenv("ACCESS_TOKEN_FILE_PATH", "config/access_token.json")
+                cls._instance._token_file_path = Path(token_file_path)
                 cls._instance._load_token_from_file()
                 logger.info("TokenManager initialized.")
         return cls._instance
@@ -36,14 +37,16 @@ class TokenManager:
 
     def _save_token_to_file(self, token: str) -> None:
         """
-        Saves the access token to a file.
+        Saves the access token to a file with secure permissions.
         """
         try:
             self._token_file_path.parent.mkdir(parents=True, exist_ok=True)
             with open(self._token_file_path, "w") as f:
                 json.dump({"access_token": token}, f)
-            logger.info(f"Access token saved to {self._token_file_path}")
-        except IOError as e:
+            # Set file permissions to 600 (read/write for owner only)
+            os.chmod(self._token_file_path, 0o600)
+            logger.info(f"Access token saved to {self._token_file_path} with secure permissions.")
+        except OSError as e:
             logger.error(f"Failed to save access token to file {self._token_file_path}: {e}")
 
     def _load_token_from_file(self) -> None:
@@ -52,14 +55,16 @@ class TokenManager:
         """
         if self._token_file_path.exists():
             try:
-                with open(self._token_file_path, "r") as f:
+                with open(self._token_file_path) as f:
                     data = json.load(f)
-                    self._access_token = data.get("access_token")
-                if self._access_token:
-                    logger.info(f"Access token loaded from {self._token_file_path}")
-                else:
-                    logger.warning(f"Access token file {self._token_file_path} is empty or malformed.")
-            except (IOError, json.JSONDecodeError) as e:
+                    token = data.get("access_token")
+                    if token and token.strip():
+                        self._access_token = token.strip()
+                        logger.info(f"Access token loaded from {self._token_file_path}")
+                    else:
+                        self._access_token = None
+                        logger.warning(f"Access token file {self._token_file_path} is empty or malformed.")
+            except (OSError, json.JSONDecodeError) as e:
                 logger.error(f"Failed to load access token from file {self._token_file_path}: {e}")
         else:
             logger.info(f"Access token file {self._token_file_path} does not exist. No token loaded.")
@@ -96,15 +101,15 @@ class TokenManager:
                 try:
                     self._token_file_path.unlink()
                     logger.info(f"Access token file {self._token_file_path} deleted.")
-                except IOError as e:
+                except OSError as e:
                     logger.error(f"Failed to delete access token file {self._token_file_path}: {e}")
         logger.info("Access token cleared.")
 
     def is_token_available(self) -> bool:
         """
-        Checks if an access token is currently available.
+        Checks if an access token is currently available and valid (non-empty).
         """
         with self._lock:
-            status = self._access_token is not None
+            status = self._access_token is not None and self._access_token.strip() != ""
         logger.debug(f"Token availability check: {status}")
         return status
