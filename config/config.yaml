@@ -1,0 +1,700 @@
+# ============================================================================
+# AUTOMATED INTRADAY TRADING SIGNAL GENERATION SYSTEM
+# Configuration File
+# ============================================================================
+# Version: 2.0.0
+# Description: Production-grade configuration for algorithmic trading system
+#              with ML-based signal generation and real-time data processing
+# ============================================================================
+
+# ============================================================================
+# SYSTEM CONFIGURATION
+# Core system settings and operational modes
+# ============================================================================
+system:
+  version: "2.0.0"
+  # Operation Mode: HISTORICAL_MODE (training/backfill) or LIVE_MODE (real-time trading)
+  mode: "HISTORICAL_MODE"  # Options: "HISTORICAL_MODE", "LIVE_MODE"
+  timezone: "Asia/Kolkata"
+  
+  # Thread Configuration for OpenMP Libraries
+  # Prevents conflicts between LightGBM and scikit-learn
+  openmp_threads: 1
+  mkl_threads: 1
+  numexpr_threads: 1
+
+# ============================================================================
+# DATABASE CONFIGURATION
+# Database settings are loaded from environment variables (DB_HOST, DB_PORT, etc.)
+# ============================================================================
+
+# ============================================================================
+# BROKER INTEGRATION
+# Zerodha KiteConnect API configuration and connection management
+# Note: API credentials (api_key, api_secret) are loaded from environment variables
+# ============================================================================
+broker:
+  # API Configuration
+  redirect_url: "http://localhost:8000/callback"
+  
+  # WebSocket Configuration
+  websocket_mode: "QUOTE"  # Options: "LTP", "QUOTE", "FULL"
+  
+  # Data Fetching Settings
+  historical_interval: "minute"  # Default historical data interval
+  should_fetch_instruments: true  # Set to true to trigger instrument synchronization
+  
+  # Supported Exchange Types
+  exchange_types:
+    - "INDICES"    # Market Indices (NIFTY, BANKNIFTY, etc.)
+    - "EQ"         # Equity - Cash Market (NSE/BSE stocks)
+    - "NFO-OPT"    # NSE Options
+    - "NFO-FUT"    # NSE Futures
+    - "BFO-FUT"    # BSE Futures
+    - "BFO-OPT"    # BSE Options
+  
+  # Connection Management
+  connection_manager:
+    max_reconnect_attempts: 10
+    initial_reconnect_delay: 5      # seconds
+    heartbeat_timeout: 30           # seconds
+    monitor_interval: 10            # seconds
+
+# ============================================================================
+# LOGGING CONFIGURATION
+# System-wide logging settings for debugging and monitoring
+# ============================================================================
+logging:
+  level: "DEBUG"
+  format: "{time:YYYY-MM-DD HH:mm:ss} | {name} | {level} | {function}:{line} | {message}"
+  file: "logs/trading_system.log"
+  rotation: "10 MB"
+  retention: "30 days"
+  compression: "zip"
+
+# ============================================================================
+# TRADING CONFIGURATION
+# Core trading logic, instruments, and strategy parameters
+# ============================================================================
+trading:
+  # Data Aggregation Settings
+  aggregation_timeframes: [5, 15, 60]  # minutes
+  feature_timeframes: [5, 15, 60]      # minutes
+  
+  # ──────────────────────────────────────────────────────────────────────────
+  # LABELING CONFIGURATION
+  # Triple barrier labeling methodology for ML training data
+  # ──────────────────────────────────────────────────────────────────────────
+  labeling:
+    # ATR (Average True Range) Settings
+    atr_period: 14
+    tp_atr_multiplier: 2.0        # Take profit barrier multiplier
+    sl_atr_multiplier: 1.5        # Stop loss barrier multiplier
+    atr_smoothing: "ema"           # Options: "ema", "sma"
+    
+    # Barrier Configuration
+    max_holding_periods: 10
+    close_open_threshold: 0.1
+    min_bars_required: 100
+    epsilon: 1.0e-9
+    use_dynamic_barriers: true
+    volatility_lookback: 20
+    atr_cache_size: 100
+    dynamic_barrier_tp_sensitivity: 0.2
+    dynamic_barrier_sl_sensitivity: 0.1
+    sample_weight_decay_factor: 0.5
+    
+    # Data Fetching Limits for Labeling Process
+    ohlcv_data_limit_for_labeling: 1000
+    minimum_ohlcv_data_for_labeling: 100
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # TECHNICAL INDICATORS CONFIGURATION
+  # TA-Lib based feature calculation with timeframe-specific parameters
+  # ──────────────────────────────────────────────────────────────────────────
+  features:
+    lookback_period: 200  # Minimum number of candles to fetch
+    
+    # Technical Indicator Configurations
+    # Each indicator can have default parameters and timeframe-specific overrides
+    configurations:
+      # ┌─ TREND-FOLLOWING INDICATORS ─────────────────────────────────────────┐
+      - name: macd
+        function: MACD
+        params:
+          default: { fastperiod: 12, slowperiod: 26, signalperiod: 9 }
+          60m: { fastperiod: 20, slowperiod: 40, signalperiod: 9 }
+      
+      - name: adx
+        function: ADX
+        params:
+          default: { timeperiod: 14 }
+          60m: { timeperiod: 20 }
+      
+      - name: sar
+        function: SAR
+        params:
+          default: { acceleration: 0.02, maximum: 0.2 }
+          60m: { acceleration: 0.025, maximum: 0.25 }
+      
+      - name: aroon
+        function: AROON
+        params:
+          default: { timeperiod: 14 }
+          60m: { timeperiod: 25 }
+      
+      - name: ht_trendline
+        function: HT_TRENDLINE
+        params:
+          default: {}
+      
+      # ┌─ MOMENTUM INDICATORS ─────────────────────────────────────────────────┐
+      - name: rsi
+        function: RSI
+        params:
+          default: { timeperiod: 14 }
+          60m: { timeperiod: 21 }
+      
+      - name: stoch
+        function: STOCH
+        params:
+          default: { fastk_period: 14, slowk_period: 3, slowd_period: 3 }
+      
+      - name: willr
+        function: WILLR
+        params:
+          default: { timeperiod: 14 }
+      
+      - name: cmo
+        function: CMO
+        params:
+          default: { timeperiod: 14 }
+      
+      - name: bop
+        function: BOP
+        params:
+          default: {}
+      
+      # ┌─ VOLATILITY INDICATORS ───────────────────────────────────────────────┐
+      - name: atr
+        function: ATR
+        params:
+          default: { timeperiod: 14 }
+      
+      - name: bbands
+        function: BBANDS
+        params:
+          default: { timeperiod: 20, nbdevup: 2.0, nbdevdn: 2.0 }
+          60m: { nbdevup: 2.5, nbdevdn: 2.5 }
+      
+      - name: stddev
+        function: STDDEV
+        params:
+          default: { timeperiod: 5, nbdev: 1.0 }
+          60m: { timeperiod: 20 }
+      
+      # ┌─ VOLUME INDICATORS ───────────────────────────────────────────────────┐
+      - name: obv
+        function: OBV
+        params:
+          default: {}
+      
+      - name: adosc
+        function: ADOSC
+        params:
+          default: { fastperiod: 3, slowperiod: 10 }
+      
+      # ┌─ CYCLE INDICATORS ────────────────────────────────────────────────────┐
+      - name: ht_dcperiod
+        function: HT_DCPERIOD
+        params:
+          default: {}
+      
+      - name: ht_phasor
+        function: HT_PHASOR
+        params:
+          default: {}
+      
+      # ┌─ OTHER INDICATORS ────────────────────────────────────────────────────┐
+      - name: ultosc
+        function: ULTOSC
+        params:
+          default: { timeperiod1: 7, timeperiod2: 14, timeperiod3: 28 }
+      
+      - name: trange
+        function: TRANGE
+        params:
+          default: {}
+      
+      - name: cci
+        function: CCI
+        params:
+          default: { timeperiod: 14 }
+          60m: { timeperiod: 20 }
+    
+    # Feature Name Mapping for Output Standardization
+    name_mapping:
+      macdsignal: "macd_signal"
+      macdhist: "macd_hist"
+      upperband: "bb_upper"
+      middleband: "bb_middle"
+      lowerband: "bb_lower"
+      aroonup: "aroon_up"
+      aroondown: "aroon_down"
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # TRADING INSTRUMENTS
+  # Market indices for signal generation and analysis
+  # ──────────────────────────────────────────────────────────────────────────
+  instruments:
+    - label: "NIFTY 50"
+      tradingsymbol: "NIFTY 50"
+      exchange: "NSE"
+      instrument_type: "EQ"
+      segment: "INDICES"
+    
+    - label: "SENSEX"
+      tradingsymbol: "SENSEX"
+      exchange: "BSE"
+      instrument_type: "EQ"
+      segment: "INDICES"
+    
+    - label: "NIFTY MIDCAP 100"
+      tradingsymbol: "NIFTY MIDCAP 100"
+      exchange: "NSE"
+      instrument_type: "EQ"
+      segment: "INDICES"
+    
+    - label: "BANKEX"
+      tradingsymbol: "BANKEX"
+      exchange: "BSE"
+      instrument_type: "EQ"
+      segment: "INDICES"
+    
+    - label: "NIFTY BANK"
+      tradingsymbol: "NIFTY BANK"
+      exchange: "NSE"
+      instrument_type: "EQ"
+      segment: "INDICES"
+    
+    - label: "NIFTY 100"
+      tradingsymbol: "NIFTY 100"
+      exchange: "NSE"
+      instrument_type: "EQ"
+      segment: "INDICES"
+    
+    - label: "NIFTY IT"
+      tradingsymbol: "NIFTY IT"
+      exchange: "NSE"
+      instrument_type: "EQ"
+      segment: "INDICES"
+    
+    - label: "NIFTY MIDCAP 50"
+      tradingsymbol: "NIFTY MIDCAP 50"
+      exchange: "NSE"
+      instrument_type: "EQ"
+      segment: "INDICES"
+
+# ============================================================================
+# MACHINE LEARNING & MODEL TRAINING
+# LightGBM model configuration, training parameters, and feature engineering
+# ============================================================================
+model_training:
+  # Basic Training Configuration
+  artifacts_path: "models/artifacts"
+  historical_data_lookback_days: 30
+  min_data_for_training: 5000
+  confidence_threshold: 0.3
+  drift_threshold_z_score: 3.0
+  model_staleness_days: 7
+  optimize_hyperparams: false
+  top_n_features: 10
+  
+  # ──────────────────────────────────────────────────────────────────────────
+  # MODEL PREDICTION CONFIGURATION
+  # ──────────────────────────────────────────────────────────────────────────
+  predictor:
+    required_artifacts:
+      model: "model.txt"
+      metadata: "metadata.json"
+      scaler: "scaler.pkl"
+      feature_stats: "feature_stats.json"
+    prediction_history_window_small: 100
+    prediction_history_window_large: 1000
+    model_staleness_max_days: 30
+    real_time_accuracy_windows: [10, 50, 100, 200]
+    confidence_degradation_threshold: 0.1
+    error_rate_threshold: 0.05
+  
+  # ──────────────────────────────────────────────────────────────────────────
+  # LIGHTGBM HYPERPARAMETERS
+  # Core model training parameters for gradient boosting
+  # ──────────────────────────────────────────────────────────────────────────
+  lgbm_params:
+    objective: "multiclass"
+    num_class: 3
+    metric: ["multi_logloss", "multi_error"]
+    boosting_type: "gbdt"
+    verbose: -1
+    seed: 42
+    deterministic: true
+    num_leaves: 31
+    learning_rate: 0.05
+    feature_fraction: 0.9
+    bagging_fraction: 0.8
+    bagging_freq: 5
+    min_child_samples: 20
+    lambda_l1: 0.1
+    lambda_l2: 0.1
+    max_depth: -1
+    min_gain_to_split: 0.0
+  
+  # ──────────────────────────────────────────────────────────────────────────
+  # HYPERPARAMETER OPTIMIZATION
+  # Optuna-based hyperparameter tuning ranges
+  # ──────────────────────────────────────────────────────────────────────────
+  optimization:
+    enabled: true
+    n_trials: 50
+    test_size: 2000
+    n_estimators_range: [100, 1000]
+    learning_rate_range: [0.001, 0.1]
+    num_leaves_range: [20, 300]
+    max_depth_range: [3, 12]
+    min_child_samples_range: [5, 100]
+    feature_fraction_range: [0.4, 1.0]
+    bagging_fraction_range: [0.4, 1.0]
+    bagging_freq_range: [1, 7]
+    lambda_l1_range: [1.0e-8, 10.0]
+    lambda_l2_range: [1.0e-8, 10.0]
+    roc_auc_multi_class: "ovr"
+    roc_auc_average: "weighted"
+    early_stopping_rounds: 50
+  
+  # ──────────────────────────────────────────────────────────────────────────
+  # VALIDATION & TRAINING STRATEGY
+  # ──────────────────────────────────────────────────────────────────────────
+  walk_forward_validation:
+    initial_train_ratio: 0.6
+    validation_ratio: 0.2
+    step_ratio: 0.5
+    n_splits: 5
+  
+  final_model:
+    num_boost_round: 1000
+  
+  retention:
+    max_model_versions: 5
+  
+  # Class Labels for Multi-class Classification
+  class_label_mapping:
+    -1: "sell"
+    0: "neutral"
+    1: "buy"
+  
+  # Feature Value Ranges for Validation
+  feature_ranges:
+    rsi_14: [0, 100]
+    bb_position: [-3, 3]
+    macd_signal: [-2, 2]
+  
+  # ──────────────────────────────────────────────────────────────────────────
+  # FEATURE ENGINEERING PIPELINE
+  # Advanced feature generation and selection algorithms
+  # ──────────────────────────────────────────────────────────────────────────
+  feature_engineering:
+    enabled: true
+    max_features_per_instrument: 200
+    quality_threshold: 0.7
+    
+    # Automated Feature Generation
+    feature_generation:
+      enabled: true
+      patterns:
+        - "momentum_ratios"       # price/price_shift ratios for momentum
+        - "volatility_adjustments" # returns normalized by volatility
+        - "trend_confirmations"   # multiple timeframe trend alignment
+        - "mean_reversion_signals" # overbought/oversold confirmations
+        - "breakout_indicators"   # price breakout confirmations
+      lookback_periods: [5, 10, 20, 50]
+      min_quality_score: 0.6
+    
+    # Feature Selection Algorithm
+    feature_selection:
+      enabled: true
+      target_feature_count: 50
+      importance_history_length: 10
+      correlation_threshold: 0.85
+      stability_weight: 0.3      # Weight for feature stability over time
+      consistency_weight: 0.3    # Weight for feature consistency across models
+      importance_weight: 0.4     # Weight for feature importance scores
+      min_selection_frequency: 0.2
+    
+    # Cross-Asset Feature Engineering
+    cross_asset:
+      enabled: true
+      correlation_lookback_days: 30
+      minimum_correlation_threshold: 0.3
+      update_frequency_minutes: 15
+      max_related_instruments: 5
+      cache_duration_minutes: 5
+      instruments:
+        1: "NIFTY 50"
+        2: "NIFTY BANK"
+        3: "SENSEX"
+
+# ============================================================================
+# SIGNAL GENERATION
+# Trading signal thresholds and generation parameters
+# ============================================================================
+signal_generation:
+  buy_threshold: 0.6
+  sell_threshold: 0.6
+
+# ============================================================================
+# SCHEDULING & TIMING
+# System scheduling, prediction intervals, and timing configuration
+# ============================================================================
+scheduler:
+  prediction_interval_minutes: 15
+  readiness_check_time: "10:29"
+  live_mode_sleep_duration: 3600    # seconds - main loop sleep duration
+  prediction_timeframe: "15min"     # timeframe for prediction pipeline
+
+time_synchronizer:
+  candle_interval_minutes: 15
+  latency_buffer_seconds: 1
+  max_sync_attempts: 3
+  sync_tolerance_seconds: 2.0
+
+# ============================================================================
+# PERFORMANCE & SYSTEM OPTIMIZATION
+# Resource management, processing limits, and performance tuning
+# ============================================================================
+performance:
+  # Processing Configuration
+  processing:
+    chunk_size: 50000
+    max_workers: 4
+    parallel_timeout_seconds: 300
+    batch_size: 10000                 # For historical aggregator
+    feature_batch_size: 1000          # For feature calculator
+    tick_queue_max_size: 100000       # Max size for the tick queue
+
+  # Memory Management
+  memory:
+    limit_percentage: 0.8
+    safety_factor: 0.9
+    low_memory_threshold_gb: 1.0
+
+  # Caching Configuration
+  cache:
+    max_size: 100
+    cleanup_batch_size: 20
+
+  # General Settings
+  max_retries: 3
+
+# ============================================================================
+# API RATE LIMITING
+# Rate limits for different API endpoints to prevent throttling
+# ============================================================================
+api_rate_limits:
+  historical_data:
+    limit: 3
+    interval: 1
+
+  websocket_subscriptions:
+    limit: 3000
+    interval: 1
+
+  order_placement:
+    limit: 10
+    interval: 1
+
+  general_api:
+    limit: 100
+    interval: 1
+
+# ============================================================================
+# DATA QUALITY & VALIDATION
+# Data integrity checks, outlier detection, and quality scoring
+# ============================================================================
+data_quality:
+  # Time Series Validation
+  time_series:
+    gap_multiplier: 2.0
+
+  # Outlier Detection
+  outlier_detection:
+    iqr_multiplier: 1.5
+
+  # Quality Penalties
+  penalties:
+    outlier_penalty: 0.1
+    gap_penalty: 0.2
+    ohlc_violation_penalty: 0.2
+    duplicate_penalty: 0.1
+
+  # Data Validation Rules
+  validation:
+    enabled: true
+    min_valid_rows: 50
+    quality_score_threshold: 80.0
+    required_columns: ["timestamp", "open", "high", "low", "close", "volume"]
+    expected_columns:
+      date: "datetime64[ns]"
+      open: "float64"
+      high: "float64"
+      low: "float64"
+      close: "float64"
+      volume: "int64"
+
+  # Live Data Thresholds
+  live_data_lpt_threshold: 1000000
+
+# ============================================================================
+# REAL-TIME DATA PROCESSING
+# Live data aggregation, candle formation, and stream processing
+# ============================================================================
+live_aggregator:
+  max_partial_candles: 10000
+  partial_candle_cleanup_hours: 2
+  health_check_success_rate_threshold: 0.95
+  health_check_avg_processing_time_ms_threshold: 100
+  health_check_validation_failures_threshold: 0.05
+  
+  # Required Fields Validation
+  required_tick_fields:
+    - "instrument_token"
+    - "timestamp"
+    - "last_traded_price"
+  
+  required_candle_fields:
+    - "instrument_token"
+    - "timeframe"
+    - "start_time"
+    - "open"
+    - "high"
+    - "low"
+    - "close"
+    - "volume"
+    - "trades"
+
+candle_buffer:
+  timeframes: [1, 5, 15, 60]
+  persistence_path: "cache/partial_candles.json"
+  persistence_interval_seconds: 60
+
+# ============================================================================
+# SYSTEM MONITORING & HEALTH
+# Health monitoring, error handling, and system diagnostics
+# ============================================================================
+health_monitor:
+  data_freshness_threshold_minutes: 30
+  monitor_interval: 300
+
+error_handler:
+  failure_threshold: 5
+  recovery_timeout: 60
+  half_open_attempts: 2
+
+data_pipeline:
+  historical_data_max_days_per_request: 60
+
+# ============================================================================
+# MARKET CALENDAR & TRADING HOURS
+# Market timing, holidays, and special trading sessions
+# ============================================================================
+market_calendar:
+  holidays_cache_path: "cache/holidays.json"
+  holidays: []
+  
+  # Regular Trading Hours
+  market_open_time: "09:15"
+  market_close_time: "15:30"
+  
+  # Special Trading Sessions
+  muhurat_trading_sessions:
+    - date: "2025-10-21"  # Diwali Laxmi Pujan
+      open: "18:00"       # Placeholder, timings to be notified
+      close: "19:15"      # Placeholder, timings to be notified
+  
+  half_day_sessions:
+    - date: "2025-02-01"  # Budget Day
+      open: "09:15"
+      close: "12:30"
+
+# ============================================================================
+# AUTHENTICATION & SECURITY
+# OAuth server configuration for Zerodha KiteConnect authentication
+# ============================================================================
+auth_server:
+  max_retries: 5
+  server_host: "0.0.0.0"
+  timeout_seconds: 300
+  open_browser: true
+  auto_close_seconds: 10
+
+# ============================================================================
+# STATISTICS & ANALYTICS
+# Performance metrics and trading analytics configuration
+# ============================================================================
+statistics:
+  sharpe_ratio:
+    enabled: true
+  
+  win_rate:
+    enabled: true
+  
+  trading_calendar:
+    bars_per_year_15min: 16000  # Approximate value
+
+# ============================================================================
+# DATA STORAGE & PERSISTENCE
+# File format settings and data persistence configuration
+# ============================================================================
+storage:
+  # Parquet Configuration
+  parquet:
+    compression: "snappy"
+    use_dictionary: true
+    version: "2.6"
+  
+  # Output Settings
+  output:
+    save_statistics: true
+    statistics_format: "json"
+  
+  # Metadata Configuration
+  metadata:
+    include_config: true
+    include_checksum: true
+    checksum_length: 16
+
+# ============================================================================
+# EXAMPLE DATA GENERATION
+# Configuration for generating sample/test data (development/testing only)
+# ============================================================================
+example:
+  data_generation:
+    random_seed: 42
+    start_date: "2023-01-01"
+    end_date: "2024-01-01"
+    frequency: "15T"
+    initial_price: 18000
+    return_mean: 0.0001
+    return_std: 0.005
+    price_noise_std: 0.001
+    high_noise_std: 0.002
+    low_noise_std: 0.002
+    volume_log_mean: 12
+    volume_log_std: 1.5
+  
+  sample_output:
+    file_name: "sample_labeled_data.csv"
+    rows_to_save: 200
+
+# ============================================================================
+# END OF CONFIGURATION
+# ============================================================================
