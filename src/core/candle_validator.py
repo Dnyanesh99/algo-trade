@@ -64,7 +64,8 @@ class CandleValidator:
     """
 
     def __init__(self) -> None:
-        assert config.data_quality is not None
+        if config.data_quality is None:
+            raise ValueError("Data quality configuration is required")
         self.validation_config = config.data_quality.validation
         self.outlier_config = config.data_quality.outlier_detection
         self.time_series_config = config.data_quality.time_series
@@ -130,11 +131,13 @@ class CandleValidator:
                 df_work["timestamp"] = pd.to_datetime(df_work["timestamp"], errors="coerce")
 
             df_work = df_work.sort_values("timestamp").reset_index(drop=True)
+            if not isinstance(df_work, pd.DataFrame):
+                raise TypeError(f"Expected a pandas DataFrame, but got {type(df_work)}")
 
-            nan_rows_before = df_work.isnull().any(axis=1).sum()
+            nan_rows_before = int(df_work.isnull().any(axis=1).sum())
             if nan_rows_before > 0:
                 df_work.dropna(subset=required_columns, inplace=True)
-                rows_removed = nan_rows_before - df_work.isnull().any(axis=1).sum()
+                rows_removed = nan_rows_before - int(df_work.isnull().any(axis=1).sum())
                 issues.append(f"Removed {rows_removed} rows with NaN values in critical columns.")
 
             # Apply validation for price columns (must be > 0) and volume (>= 0 for indices, > 0 for stocks)
@@ -169,7 +172,7 @@ class CandleValidator:
             if ohlc_violations > 0:
                 issues.append(f"Detected and corrected {ohlc_violations} total OHLC violations.")
 
-            duplicate_timestamps = df_work["timestamp"].duplicated().sum()
+            duplicate_timestamps = int(df_work["timestamp"].duplicated().sum())
             if duplicate_timestamps > 0:
                 df_work.drop_duplicates(subset=["timestamp"], keep="first", inplace=True)
                 issues.append(f"Removed {duplicate_timestamps} duplicate timestamps, keeping the first entry.")

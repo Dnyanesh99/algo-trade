@@ -64,7 +64,8 @@ class LGBMTrainer:
         self.feature_engineering = self.feature_calculator.feature_engineering
 
         # Load configuration
-        assert config.model_training is not None
+        if config.model_training is None:
+            raise ValueError("Model training configuration is required")
         self.model_config: ModelTrainingConfig = config.model_training
         self.artifacts_path = Path(self.model_config.artifacts_path)
         self.artifacts_path.mkdir(parents=True, exist_ok=True)
@@ -234,7 +235,8 @@ class LGBMTrainer:
         """
         Returns default LightGBM parameters from config.
         """
-        assert self.model_config is not None
+        if self.model_config is None:
+            raise ValueError("Model training configuration is required")
         params = self.model_config.lgbm_params.copy()
         params.update(
             {
@@ -274,7 +276,8 @@ class LGBMTrainer:
         Performs walk-forward validation and returns model, metrics, feature importance,
         the scaler from the last fold, and the training features from the last fold.
         """
-        assert self.model_config is not None
+        if self.model_config is None:
+            raise ValueError("Model training configuration is required")
         tscv = TimeSeriesSplit(n_splits=self.model_config.walk_forward_validation.n_splits)
         all_predictions = []
         all_actuals = []
@@ -315,13 +318,21 @@ class LGBMTrainer:
 
             model = await loop.run_in_executor(None, _train_lgb_model, train_data, val_data)
 
-            assert model is not None
+            if model is None:
+                raise ValueError("Model training failed")
             y_pred_proba = model.predict(X_val_scaled, num_iteration=model.best_iteration)
+            # Convert to numpy array if it's a sparse matrix
+            if hasattr(y_pred_proba, "toarray"):
+                y_pred_proba = y_pred_proba.toarray()
             y_pred = np.argmax(y_pred_proba, axis=1) - 1
 
-            all_predictions.extend(y_pred)
-            all_actuals.extend(y_val.values)
-            all_probabilities.extend(y_pred_proba)
+            all_predictions.extend(y_pred.tolist())
+            all_actuals.extend(y_val.values.tolist())
+            # Handle both dense and sparse matrices
+            if hasattr(y_pred_proba, "toarray"):
+                all_probabilities.extend(y_pred_proba.toarray().tolist())
+            elif isinstance(y_pred_proba, np.ndarray):
+                all_probabilities.extend(y_pred_proba.tolist())
 
             feature_importance_sum += model.feature_importance(importance_type="gain")
             n_windows += 1
@@ -414,11 +425,11 @@ class LGBMTrainer:
         """
         metrics = {
             "accuracy": accuracy_score(y_true, y_pred),
-            "f1_weighted": f1_score(y_true, y_pred, average="weighted", zero_division=0),
-            "precision_weighted": precision_score(y_true, y_pred, average="weighted", zero_division=0),
-            "recall_weighted": recall_score(y_true, y_pred, average="weighted", zero_division=0),
+            "f1_weighted": f1_score(y_true, y_pred, average="weighted", zero_division="0"),
+            "precision_weighted": precision_score(y_true, y_pred, average="weighted", zero_division="0"),
+            "recall_weighted": recall_score(y_true, y_pred, average="weighted", zero_division="0"),
             "roc_auc_ovr_weighted": roc_auc_score(y_true, y_proba, multi_class="ovr", average="weighted"),
-            "classification_report": classification_report(y_true, y_pred, output_dict=True, zero_division=0),
+            "classification_report": classification_report(y_true, y_pred, output_dict=True, zero_division="0"),
             "confusion_matrix": confusion_matrix(y_true, y_pred).tolist(),
         }
 
@@ -500,7 +511,7 @@ class LGBMTrainer:
         # Record per-class metrics
         if "per_class_metrics" in metrics:
             for class_label, class_metrics in metrics["per_class_metrics"].items():
-                class_name = self.model_config.class_label_mapping.get(int(class_label), class_label)
+                class_name = str(self.model_config.class_label_mapping.get(int(class_label), class_label))
 
                 metrics_registry.record_model_performance(
                     str(instrument_id), timeframe, "precision", class_name, class_metrics.get("precision", 0.0)
@@ -585,7 +596,8 @@ class LGBMTrainer:
         """
         Removes old model versions keeping only the most recent N.
         """
-        assert self.model_config is not None
+        if self.model_config is None:
+            raise ValueError("Model training configuration is required")
         max_versions = self.model_config.retention.max_model_versions
         pattern = f"lgbm_{instrument_id}_{timeframe}_*"
         model_dirs = sorted(

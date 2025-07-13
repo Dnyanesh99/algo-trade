@@ -197,10 +197,13 @@ ta-lib/
 
 config/config.yaml
 GEMINI.md
-CLAUDE.md
 review.txt
 README.dev.md
+CLAUDE.md
 
 # Documentation files                                                                                                             │
 docs/ZerodhaKiteConnect.txt
-docs/project_docs.txt 
+docs/project_docs.txt
+
+# Generated Docker requirements file
+requirements.txt 

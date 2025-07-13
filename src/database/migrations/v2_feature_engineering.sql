@@ -40,14 +40,13 @@ CREATE TABLE IF NOT EXISTS feature_scores (
     consistency_score DOUBLE PRECISION NOT NULL,
     composite_score DOUBLE PRECISION NOT NULL,
     model_version VARCHAR(100) NOT NULL,
-    model_accuracy DOUBLE PRECISION NOT NULL,
     training_timestamp TIMESTAMPTZ NOT NULL,
     is_selected BOOLEAN DEFAULT FALSE,
     selection_rank INTEGER,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     
-    CONSTRAINT feature_scores_instrument_timeframe_feature_version_key 
-    UNIQUE (instrument_id, timeframe, feature_name, model_version)
+    CONSTRAINT feature_scores_instrument_timeframe_feature_training_key 
+    UNIQUE (instrument_id, timeframe, feature_name, training_timestamp)
 );
 
 -- Create hypertable for feature score history
@@ -145,7 +144,7 @@ SELECT
     AVG(composite_score) AS avg_score,
     STDDEV(composite_score) AS score_stability,
     COUNT(*) AS training_sessions,
-    MAX(model_accuracy) AS best_model_accuracy
+    MAX(composite_score) AS best_composite_score
 FROM feature_scores
 GROUP BY instrument_id, timeframe, feature_name, day;
 
@@ -176,7 +175,7 @@ SELECT
     feature_name,
     AVG(composite_score) as avg_importance,
     STDDEV(composite_score) as importance_stability,
-    AVG(model_accuracy) as avg_model_performance,
+    AVG(composite_score) as avg_model_performance,
     COUNT(*) as selection_frequency,
     MAX(training_timestamp) as last_updated
 FROM feature_scores
@@ -184,13 +183,9 @@ WHERE training_timestamp > NOW() - INTERVAL '30 days'
 GROUP BY instrument_id, timeframe, feature_name
 ORDER BY avg_importance DESC;
 
--- 8. Data Retention Policies
-SELECT add_retention_policy('engineered_features', INTERVAL '90 days');
-SELECT add_retention_policy('cross_asset_features', INTERVAL '90 days');
-SELECT add_retention_policy('feature_scores', INTERVAL '180 days');
-SELECT add_retention_policy('feature_selection_history', INTERVAL '365 days');
-
--- 9. Compression Policies for Storage Optimization
-SELECT add_compression_policy('engineered_features', INTERVAL '7 days');
-SELECT add_compression_policy('cross_asset_features', INTERVAL '7 days');
-SELECT add_compression_policy('feature_scores', INTERVAL '30 days');
+-- 8. Enable compression settings for feature engineering tables
+-- Policies will be applied in v4_policies.sql
+ALTER TABLE engineered_features SET (timescaledb.compress, timescaledb.compress_segmentby = 'instrument_id', timescaledb.compress_orderby = 'timestamp DESC');
+ALTER TABLE cross_asset_features SET (timescaledb.compress, timescaledb.compress_segmentby = 'primary_instrument_id', timescaledb.compress_orderby = 'timestamp DESC');
+ALTER TABLE feature_scores SET (timescaledb.compress, timescaledb.compress_segmentby = 'instrument_id', timescaledb.compress_orderby = 'training_timestamp DESC');
+ALTER TABLE feature_selection_history SET (timescaledb.compress, timescaledb.compress_segmentby = 'instrument_id', timescaledb.compress_orderby = 'selection_timestamp DESC');

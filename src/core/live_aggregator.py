@@ -73,9 +73,12 @@ class LiveAggregator:
         self.candle_validator = CandleValidator()
 
         # Configuration from config.yaml
-        assert config.trading is not None
-        assert config.live_aggregator is not None
-        assert config.data_quality is not None
+        if config.trading is None:
+            raise ValueError("Trading configuration is required")
+        if config.live_aggregator is None:
+            raise ValueError("Live aggregator configuration is required")
+        if config.data_quality is None:
+            raise ValueError("Data quality configuration is required")
         self.timeframes = config.trading.aggregation_timeframes
         self.max_partial_candles = config.live_aggregator.max_partial_candles
         self.partial_candle_cleanup_hours = config.live_aggregator.partial_candle_cleanup_hours

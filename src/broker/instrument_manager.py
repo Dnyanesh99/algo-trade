@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Any, Optional
 
 from src.broker.rest_client import KiteRESTClient
 from src.database.instrument_repo import InstrumentRepository
@@ -26,82 +26,100 @@ class InstrumentManager:
 
     async def sync_instruments(self) -> None:
         """
-        Fetches all instruments from the broker, and updates/inserts them into the database.
-        It also ensures that the configured instruments have their tokens updated.
+        Fetches all instruments from the broker using optimized CSV approach,
+        and updates/inserts configured instruments into the database.
+        Uses lookup optimization for handling large instrument datasets efficiently.
         """
-        logger.info("Starting instrument synchronization...")
+        logger.info("Starting optimized instrument synchronization...")
         broker_instruments = await self.rest_client.get_instruments()
 
         if not broker_instruments:
             logger.error("Failed to fetch instruments from broker. Synchronization aborted.")
             return
 
-        logger.info(f"Fetched {len(broker_instruments)} instruments from broker.")
+        logger.info(f"Fetched {len(broker_instruments)} instruments from broker using optimized CSV approach.")
 
-        for broker_inst in broker_instruments:
-            logger.debug(
-                f"Broker instrument: tradingsymbol={broker_inst.get('tradingsymbol')}, exchange={broker_inst.get('exchange')}, instrument_type={broker_inst.get('instrument_type')}"
-            )
+        # Create optimized lookup index for fast instrument matching
+        # Key format: "tradingsymbol|exchange|instrument_type"
+        logger.info("Building instrument lookup index for fast matching...")
+        instrument_lookup = {}
+        for instrument_data in broker_instruments:
+            tradingsymbol = instrument_data.get("tradingsymbol")
+            exchange = instrument_data.get("exchange")
+            instrument_type = instrument_data.get("instrument_type")
+
+            if tradingsymbol and exchange and instrument_type:
+                lookup_key = f"{tradingsymbol}|{exchange}|{instrument_type}"
+                instrument_lookup[lookup_key] = instrument_data
+
+        logger.info(f"Built lookup index with {len(instrument_lookup)} unique instrument keys.")
+
+        # Process configured instruments using lookup index
+        processed_count = 0
+        matched_count = 0
 
         for configured_inst in self.configured_instruments:
+            processed_count += 1
             label = configured_inst.label
             exchange = configured_inst.exchange
             instrument_type = configured_inst.instrument_type
             tradingsymbol = configured_inst.tradingsymbol
 
-            found_match = False
-            for broker_inst in broker_instruments:
-                # Match based on tradingsymbol, exchange, and instrument_type
-                # For INDEX, tradingsymbol is usually the name itself
-                if (
-                    broker_inst.get("tradingsymbol") == tradingsymbol
-                    and broker_inst.get("exchange") == exchange
-                    and broker_inst.get("instrument_type") == instrument_type
-                ):
-                    # Extract and validate required fields
-                    instrument_token_val = broker_inst.get("instrument_token")
-                    tradingsymbol_val = broker_inst.get("tradingsymbol")
-                    instrument_type_val = broker_inst.get("instrument_type")
-                    exchange_val = broker_inst.get("exchange")
+            # Use lookup index for O(1) instrument matching
+            lookup_key = f"{tradingsymbol}|{exchange}|{instrument_type}"
+            broker_inst: Optional[dict[str, Any]] = instrument_lookup.get(lookup_key)
 
-                    if not all([instrument_token_val, tradingsymbol_val, instrument_type_val, exchange_val]):
-                        logger.warning(f"Skipping instrument due to missing critical data: {broker_inst}")
-                        continue
+            if broker_inst is not None:
+                matched_count += 1
 
-                    # Prepare data for DB insertion/update
-                    instrument_data_obj = InstrumentData(
-                        instrument_token=int(instrument_token_val) if instrument_token_val is not None else 0,
-                        exchange_token=broker_inst.get("exchange_token"),
-                        tradingsymbol=str(tradingsymbol_val),
-                        name=broker_inst.get("name"),
-                        last_price=broker_inst.get("last_price"),
-                        expiry=broker_inst.get("expiry"),
-                        strike=broker_inst.get("strike"),
-                        tick_size=broker_inst.get("tick_size"),
-                        lot_size=broker_inst.get("lot_size"),
-                        instrument_type=str(instrument_type_val),
-                        segment=broker_inst.get("segment"),
-                        exchange=str(exchange_val),
-                    )
+                # Extract and validate required fields
+                instrument_token_val = broker_inst.get("instrument_token")
+                tradingsymbol_val = broker_inst.get("tradingsymbol")
+                instrument_type_val = broker_inst.get("instrument_type")
+                exchange_val = broker_inst.get("exchange")
 
-                    # Check if instrument already exists in DB
-                    existing_inst: Optional[
-                        InstrumentRecord
-                    ] = await self.instrument_repo.get_instrument_by_tradingsymbol(tradingsymbol, exchange)
+                if not all([instrument_token_val, tradingsymbol_val, instrument_type_val, exchange_val]):
+                    logger.warning(f"Skipping instrument due to missing critical data: {broker_inst}")
+                    continue
 
-                    if existing_inst:
-                        # Update existing instrument
-                        await self.instrument_repo.update_instrument(existing_inst.instrument_id, instrument_data_obj)
-                        logger.info(f"Updated instrument: {label} ({tradingsymbol})")
-                    else:
-                        # Insert new instrument
-                        await self.instrument_repo.insert_instrument(instrument_data_obj)
-                        logger.info(f"Inserted new instrument: {label} ({tradingsymbol})")
-                    found_match = True
-                    break
-            if not found_match:
-                logger.warning(f"Configured instrument {label} ({tradingsymbol}) not found on broker.")
-        logger.info("Instrument synchronization completed.")
+                # Prepare data for DB insertion/update
+                instrument_data_obj = InstrumentData(
+                    instrument_token=int(instrument_token_val) if instrument_token_val is not None else 0,
+                    exchange_token=broker_inst.get("exchange_token"),
+                    tradingsymbol=str(tradingsymbol_val),
+                    name=broker_inst.get("name"),
+                    last_price=broker_inst.get("last_price"),
+                    expiry=broker_inst.get("expiry"),
+                    strike=broker_inst.get("strike"),
+                    tick_size=broker_inst.get("tick_size"),
+                    lot_size=broker_inst.get("lot_size"),
+                    instrument_type=str(instrument_type_val),
+                    segment=broker_inst.get("segment"),
+                    exchange=str(exchange_val),
+                )
+
+                # Check if instrument already exists in DB
+                existing_inst: Optional[InstrumentRecord] = await self.instrument_repo.get_instrument_by_tradingsymbol(
+                    tradingsymbol, exchange
+                )
+
+                if existing_inst:
+                    # Update existing instrument
+                    await self.instrument_repo.update_instrument(existing_inst.instrument_id, instrument_data_obj)
+                    logger.info(f"Updated instrument: {label} ({tradingsymbol}) - Token: {instrument_token_val}")
+                else:
+                    # Insert new instrument
+                    await self.instrument_repo.insert_instrument(instrument_data_obj)
+                    logger.info(f"Inserted new instrument: {label} ({tradingsymbol}) - Token: {instrument_token_val}")
+            else:
+                logger.warning(
+                    f"Configured instrument {label} ({tradingsymbol}|{exchange}|{instrument_type}) not found in broker data."
+                )
+
+        logger.info(
+            f"Instrument synchronization completed. "
+            f"Processed: {processed_count}, Matched: {matched_count}, Success Rate: {matched_count / processed_count * 100:.1f}%"
+        )
 
     async def get_instrument_token_by_label(self, label: str) -> Optional[int]:
         """

@@ -11,6 +11,7 @@ from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
+import pytz
 from pydantic import BaseModel
 
 from src.core.feature_validator import FeatureValidator
@@ -66,11 +67,13 @@ class FeatureEngineeringPipeline:
         self.health_monitor = health_monitor
 
         # Load configuration
-        assert config.model_training is not None
+        if config.model_training is None:
+            raise ValueError("Model training configuration is required")
         self.config: FeatureEngineeringConfig = config.model_training.feature_engineering
 
         # Get existing feature configurations from config.yaml
-        assert config.trading is not None
+        if config.trading is None:
+            raise ValueError("Trading configuration is required")
         self.base_feature_configs = config.trading.features.configurations
         self.feature_timeframes = config.trading.feature_timeframes
 
@@ -191,7 +194,9 @@ class FeatureEngineeringPipeline:
                             value=momentum_ratio,
                             generation_method="price_ratio",
                             source_features=["close"],
-                            quality_score=min(1.0, abs(momentum_ratio) * 10),  # Higher volatility = higher quality
+                            quality_score=min(1.0, abs(momentum_ratio) * 10)
+                            if np.isfinite(momentum_ratio)
+                            else 0.0,  # Penalize non-finite values
                         )
 
                 # RSI momentum confirmation (using existing RSI values)
@@ -729,6 +734,8 @@ class FeatureEngineeringPipeline:
                     instrument_id,
                     timeframe,
                     final_selection,
+                    {"method": "composite_scoring", "threshold": self.config.feature_selection.target_feature_count},
+                    len(all_features),
                     "composite_scoring",
                     f"model_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
                 )
@@ -742,16 +749,96 @@ class FeatureEngineeringPipeline:
     async def _remove_correlated_features(
         self, feature_scores: dict[str, FeatureScore], instrument_id: int, timeframe: str
     ) -> dict[str, FeatureScore]:
-        """Remove highly correlated features to reduce redundancy"""
+        """Remove highly correlated features to reduce redundancy, prioritizing higher composite scores."""
+        if not feature_scores:
+            return {}
+
         try:
-            # Simplified correlation removal - in production would use actual feature correlation
-            # For now, just return the input scores
-            # Implementation would require loading recent feature values and calculating correlations
-            return feature_scores
+            # Sort features by composite score in descending order
+            sorted_features = sorted(feature_scores.values(), key=lambda x: x.composite_score, reverse=True)
+            selected_features_names = [f.feature_name for f in sorted_features]
+
+            # Fetch historical feature data for correlation calculation
+            lookback_days = (
+                self.config.feature_selection.importance_history_length
+                * self.config.feature_selection.correlation_data_lookback_multiplier
+            )  # Use history length as a proxy for data needed
+            end_time = datetime.now(
+                pytz.timezone(ConfigLoader().get_config().system.timezone)
+            )  # Assuming APP_TIMEZONE is accessible
+            start_time = end_time - timedelta(days=lookback_days)
+
+            historical_features_df = await self.feature_repo.get_features_for_correlation(
+                instrument_id, timeframe, start_time, end_time
+            )
+
+            if historical_features_df.empty or len(historical_features_df.columns) < 2:
+                logger.warning(
+                    f"Insufficient historical data for correlation analysis for {instrument_id} ({timeframe}). Skipping correlation removal."
+                )
+                return feature_scores  # Return all features if not enough data
+
+            # Filter historical_features_df to only include features present in selected_features_names
+            # And ensure all columns are numeric for correlation calculation
+            cols_to_correlate = [
+                col
+                for col in historical_features_df.columns
+                if col in selected_features_names and pd.api.types.is_numeric_dtype(historical_features_df[col])
+            ]
+            if len(cols_to_correlate) < 2:
+                logger.warning(
+                    f"Not enough numeric features for correlation analysis after filtering for {instrument_id} ({timeframe}). Skipping correlation removal."
+                )
+                return feature_scores
+
+            filtered_df = historical_features_df[cols_to_correlate].dropna()
+
+            if filtered_df.empty or len(filtered_df.columns) < 2:
+                logger.warning(
+                    f"Not enough clean data for correlation analysis after dropping NaNs for {instrument_id} ({timeframe}). Skipping correlation removal."
+                )
+                return feature_scores
+
+            correlation_matrix = filtered_df.corr().abs()
+
+            # Initialize a set to store the names of features to keep
+            features_to_keep_names: set[str] = set()
+
+            # Iterate through features sorted by composite score
+            for feature_score in sorted_features:
+                current_feature_name = feature_score.feature_name
+
+                # If the feature is not already marked for removal and is in the correlation matrix
+                if (
+                    current_feature_name in correlation_matrix.columns
+                    and current_feature_name not in features_to_keep_names
+                ):
+                    is_highly_correlated = False
+                    for kept_feature_name in features_to_keep_names:
+                        if (
+                            kept_feature_name in correlation_matrix.columns
+                            and current_feature_name in correlation_matrix.index
+                            and correlation_matrix.loc[current_feature_name, kept_feature_name]
+                            > self.config.feature_selection.correlation_threshold
+                        ):
+                            is_highly_correlated = True
+                            break
+
+                    if not is_highly_correlated:
+                        features_to_keep_names.add(current_feature_name)
+
+            # Construct the new dictionary of feature scores with only the selected features
+            reduced_feature_scores = {name: feature_scores[name] for name in features_to_keep_names}
+            logger.info(
+                f"Reduced features for {instrument_id} ({timeframe}) from {len(feature_scores)} to {len(reduced_feature_scores)} after correlation analysis."
+            )
+            return reduced_feature_scores
 
         except Exception as e:
-            logger.warning(f"Correlation removal failed: {e}")
-            return feature_scores
+            logger.error(
+                f"Error during correlation-based feature removal for {instrument_id} ({timeframe}): {e}", exc_info=True
+            )
+            return feature_scores  # Return original features in case of error
 
     async def _get_related_instruments(self, primary_instrument_id: int) -> list[tuple[int, str]]:
         """Get related instruments for cross-asset features"""

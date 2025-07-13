@@ -75,7 +75,16 @@ class HistoricalProcessor:
                 logger.error(f"Missing expected column '{col}' in historical data for {symbol}")
                 return pd.DataFrame(), DataQualityReport(0, 0, {}, 0, 0, 0, {}, 0.0, [f"Missing column: {col}"])
             try:
-                df[col] = df[col].astype(dtype)
+                # Special handling for datetime columns to handle timezone-aware data
+                if col == "date" and dtype == "datetime64[ns]":
+                    if df[col].dt.tz is not None:
+                        # Convert timezone-aware datetime to timezone-naive UTC datetime
+                        df[col] = df[col].dt.tz_convert("UTC").dt.tz_localize(None)
+                    else:
+                        # Already timezone-naive, just ensure it's datetime64[ns]
+                        df[col] = pd.to_datetime(df[col])
+                else:
+                    df[col] = df[col].astype(dtype)
             except (TypeError, ValueError) as e:
                 logger.error(f"Error casting column '{col}' to {dtype} for {symbol}: {e}")
                 return pd.DataFrame(), DataQualityReport(

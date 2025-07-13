@@ -62,7 +62,8 @@ class ModelPredictor:
 
         # Configuration
         self.predictor_config: ModelTrainingConfig
-        assert config.model_training is not None
+        if config.model_training is None:
+            raise ValueError("Model training configuration is required")
         self.predictor_config = config.model_training
         self.artifacts_path = Path(self.predictor_config.artifacts_path)
 
@@ -70,7 +71,8 @@ class ModelPredictor:
         self.prediction_history: list[PredictionResult] = []
 
         # Confidence calibration
-        assert self.predictor_config is not None
+        if self.predictor_config is None:
+            raise ValueError("Predictor configuration is required")
         self.confidence_threshold = self.predictor_config.confidence_threshold
         self.calibration_params: dict[str, Any] = {}
 
@@ -82,9 +84,8 @@ class ModelPredictor:
         """
         Loads a model with all associated artifacts, including feature statistics.
         """
+        start_time = time.time()
         try:
-            start_time = time.time()
-
             model_dir = model_path.parent if model_path.is_file() else model_path
             model_file = model_dir / self.predictor_config.predictor.required_artifacts["model"]
             metadata_path = model_dir / self.predictor_config.predictor.required_artifacts["metadata"]
@@ -286,7 +287,8 @@ class ModelPredictor:
 
             test_input = np.zeros((1, model_features))
             test_prediction = model.predict(test_input)
-            assert isinstance(test_prediction, np.ndarray)
+            if not isinstance(test_prediction, np.ndarray):
+                raise TypeError(f"Expected a numpy array, but got {type(test_prediction)}")
             if test_prediction.shape[1] != 3:
                 logger.error(f"Invalid prediction shape: {test_prediction.shape}")
                 return False
@@ -299,7 +301,8 @@ class ModelPredictor:
         """
         Comprehensive feature validation.
         """
-        assert self.predictor_config is not None
+        if self.predictor_config is None:
+            raise ValueError("Predictor configuration is required")
         expected_features = set(metadata["features"]["names"])
         provided_features = set(feature_vector.keys())
         errors, warnings = [], []
@@ -319,7 +322,7 @@ class ModelPredictor:
                 errors.append(f"Invalid value for {feature}: {value}")
             if hasattr(self.predictor_config, "feature_ranges"):
                 ranges = self.predictor_config.feature_ranges
-                if feature in ranges:
+                if ranges is not None and feature in ranges:
                     min_val, max_val = ranges[feature]
                     if not (min_val <= value <= max_val):
                         warnings.append(f"Feature {feature} out of expected range [{min_val}, {max_val}]: {value}")
@@ -343,7 +346,8 @@ class ModelPredictor:
         Monitors for feature drift using z-score against training data statistics.
         Enhanced with comprehensive monitoring.
         """
-        assert self.predictor_config is not None
+        if self.predictor_config is None:
+            raise ValueError("Predictor configuration is required")
         drift_detected = False
         instrument_id, timeframe = model_key.split("_", 1)
 
@@ -419,7 +423,8 @@ class ModelPredictor:
         """
         Comprehensive risk assessment for the prediction.
         """
-        assert self.predictor_config is not None
+        if self.predictor_config is None:
+            raise ValueError("Predictor configuration is required")
         risk_factors = {}
         entropy = -sum(p * np.log(p + 1e-10) for p in prediction.probabilities.values() if p > 0)
         risk_factors["model_uncertainty"] = entropy / np.log(3)

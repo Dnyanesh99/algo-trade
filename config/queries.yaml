@@ -41,10 +41,10 @@ feature_repo:
         quality_score = EXCLUDED.quality_score
   insert_feature_scores: |
     INSERT INTO feature_scores
-    (instrument_id, timeframe, timestamp, feature_name, importance_score,
+    (instrument_id, timeframe, training_timestamp, feature_name, importance_score,
       stability_score, consistency_score, composite_score, model_version)
     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-    ON CONFLICT (instrument_id, timeframe, feature_name, timestamp)
+    ON CONFLICT (instrument_id, timeframe, feature_name, training_timestamp)
     DO UPDATE SET
         importance_score = EXCLUDED.importance_score,
         stability_score = EXCLUDED.stability_score,
@@ -55,13 +55,14 @@ feature_repo:
     SELECT selected_features
     FROM feature_selection_history
     WHERE instrument_id = $1 AND timeframe = $2
-    ORDER BY timestamp DESC
+    ORDER BY selection_timestamp DESC
     LIMIT 1
   insert_feature_selection_history: |
     INSERT INTO feature_selection_history
-    (instrument_id, timeframe, timestamp, selected_features,
-      total_features_considered, selection_method, model_version)
-    VALUES ($1, $2, $3, $4, $5, $6, $7)
+    (instrument_id, timeframe, selection_timestamp, selected_features,
+      selection_criteria, total_features_available, features_selected,
+      selection_method, model_version)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 
 instrument_repo:
   insert_instrument: |

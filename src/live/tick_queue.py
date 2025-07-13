@@ -27,7 +27,8 @@ class TickQueue:
     def __init__(self) -> None:
         if self._is_initialized:
             return
-        assert config.performance is not None
+        if config.performance is None:
+            raise ValueError("Performance configuration is required")
         self._queue = asyncio.Queue(maxsize=config.performance.processing.tick_queue_max_size)
         TickQueue._is_initialized = True
         logger.info("TickQueue initialized.")

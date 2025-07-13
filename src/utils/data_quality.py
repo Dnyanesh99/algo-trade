@@ -84,12 +84,14 @@ class DataValidator:
         if ohlc_violations_count > 0:
             issues.append(f"Total OHLC violations resulting in row removal: {ohlc_violations_count}.")
 
-        duplicates = df_clean["timestamp"].duplicated().sum()
+        duplicates = int(df_clean["timestamp"].duplicated().sum())
         if duplicates > 0:
             df_clean = df_clean.drop_duplicates(subset=["timestamp"], keep="last")
             issues.append(f"Removed {duplicates} duplicate timestamps, keeping last entry.")
 
         df_clean = df_clean.sort_values("timestamp").reset_index(drop=True)
+        if not isinstance(df_clean, pd.DataFrame):
+            raise TypeError(f"Expected a pandas DataFrame, but got {type(df_clean)}")
 
         # Gap detection logic requires a timeframe, which is not available here.
         # This should be handled by a higher-level validator like CandleValidator.

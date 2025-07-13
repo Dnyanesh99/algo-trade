@@ -46,6 +46,10 @@ class BarrierConfig:
     epsilon: float
     use_dynamic_barriers: bool
     volatility_lookback: int
+    atr_cache_size: int
+    dynamic_barrier_tp_sensitivity: float
+    dynamic_barrier_sl_sensitivity: float
+    sample_weight_decay_factor: float
 
 
 @dataclass
@@ -61,6 +65,7 @@ class LabelingStats:
     data_quality_score: float
     sharpe_ratio: float
     win_rate: float
+    profit_factor: float  # ADD THIS
 
 
 class OptimizedTripleBarrierLabeler:
@@ -83,6 +88,7 @@ class OptimizedTripleBarrierLabeler:
         executor: Optional[ProcessPoolExecutor] = None,
     ):
         self.config = barrier_config
+        self.validate_config()  # Add this
         self.label_repo = label_repo
         self.label_stats: dict[str, LabelingStats] = {}
         self.stats_lock = threading.Lock()
@@ -94,6 +100,44 @@ class OptimizedTripleBarrierLabeler:
             f"SL={self.config.sl_atr_multiplier}x ATR, "
             f"Max holding={self.config.max_holding_periods} bars"
         )
+
+    def validate_config(self) -> None:
+        """Validate barrier configuration for production use."""
+        if self.config.tp_atr_multiplier <= 0:
+            raise ValueError("TP multiplier must be positive")
+
+        if self.config.sl_atr_multiplier <= 0:
+            raise ValueError("SL multiplier must be positive")
+
+        if self.config.tp_atr_multiplier <= self.config.sl_atr_multiplier:
+            logger.warning(
+                f"TP multiplier ({self.config.tp_atr_multiplier}) <= "
+                f"SL multiplier ({self.config.sl_atr_multiplier}) - may result in poor risk/reward"
+            )
+
+        if self.config.max_holding_periods < 2:
+            raise ValueError("Max holding periods must be at least 2")
+
+        if self.config.atr_period < 2:
+            raise ValueError("ATR period must be at least 2")
+
+        if self.config.epsilon <= 0:
+            raise ValueError("Epsilon must be positive")
+
+        if self.config.volatility_lookback < 1:
+            raise ValueError("Volatility lookback must be at least 1")
+
+        if self.config.atr_cache_size <= 0:
+            raise ValueError("ATR cache size must be positive")
+
+        if not 0 < self.config.dynamic_barrier_tp_sensitivity < 1:
+            raise ValueError("Dynamic barrier TP sensitivity must be between 0 and 1")
+
+        if not 0 < self.config.dynamic_barrier_sl_sensitivity < 1:
+            raise ValueError("Dynamic barrier SL sensitivity must be between 0 and 1")
+
+        if not 0 <= self.config.sample_weight_decay_factor <= 1:
+            raise ValueError("Sample weight decay factor must be between 0 and 1")
 
     @staticmethod
     @jit(nopython=True, cache=True, fastmath=True)  # type: ignore[misc]
@@ -158,7 +202,7 @@ class OptimizedTripleBarrierLabeler:
 
         with self._cache_lock:
             self._atr_cache[cache_key] = atr
-            if len(self._atr_cache) > 100:  # Limit cache size
+            if len(self._atr_cache) > self.config.atr_cache_size:
                 self._atr_cache.pop(next(iter(self._atr_cache)))
 
         return atr
@@ -176,8 +220,12 @@ class OptimizedTripleBarrierLabeler:
 
         vol_zscore = (atr - vol_mean) / (vol_std + 1e-10)
 
-        tp_multiplier = self.config.tp_atr_multiplier * (1 + 0.2 * np.tanh(vol_zscore))
-        sl_multiplier = self.config.sl_atr_multiplier * (1 + 0.1 * np.tanh(vol_zscore))
+        tp_multiplier = self.config.tp_atr_multiplier * (
+            1 + self.config.dynamic_barrier_tp_sensitivity * np.tanh(vol_zscore)
+        )
+        sl_multiplier = self.config.sl_atr_multiplier * (
+            1 + self.config.dynamic_barrier_sl_sensitivity * np.tanh(vol_zscore)
+        )
 
         return tp_multiplier.values, sl_multiplier.values
 
@@ -201,7 +249,29 @@ class OptimizedTripleBarrierLabeler:
         NDArray[np.float64],
         NDArray[np.float64],
     ]:
-        """Optimized barrier checking with parallel processing."""
+        """
+        Core engine for checking triple barriers in parallel.
+
+        Args:
+            high: Array of high prices
+            low: Array of low prices
+            open_: Array of open prices
+            close: Array of close prices
+            entry_prices: Price at which position is initiated (next bar's open)
+            tp_prices: Upper barrier (take-profit)
+            sl_prices: Lower barrier (stop-loss)
+            max_periods: Maximum number of bars to hold position
+            epsilon: Threshold for determining non-neutral return at timeout
+
+        Returns:
+            Tuple containing:
+            - labels: -1 (SELL), 0 (NEUTRAL), 1 (BUY)
+            - exit_bar_offsets: Number of bars held
+            - exit_prices: Price at which position was exited
+            - exit_reasons: Enum value from ExitReason
+            - mfe: Max Favorable Excursion as percentage
+            - mae: Max Adverse Excursion as percentage
+        """
         n = len(entry_prices)
         labels = np.zeros(n, dtype=np.int8)
         exit_bar_offsets = np.zeros(n, dtype=np.int32)
@@ -214,39 +284,65 @@ class OptimizedTripleBarrierLabeler:
             if np.isnan(tp_prices[i]) or np.isnan(sl_prices[i]):
                 continue
 
+            # CRITICAL: Cannot label if we don't have future data
+            if i + 1 >= n:
+                continue
+
             exit_reasons[i] = ExitReason.TIME_OUT
 
+            # Start from j=1 (next bar after entry)
             for j in range(1, min(max_periods + 1, n - i)):
                 bar_idx = i + j
+
+                # Calculate returns from entry price
                 high_return = (high[bar_idx] - entry_prices[i]) / entry_prices[i]
                 low_return = (low[bar_idx] - entry_prices[i]) / entry_prices[i]
+
+                # Track MFE/MAE
                 mfe[i] = max(mfe[i], high_return)
                 mae[i] = min(mae[i], low_return)
 
+                # Check barrier hits
                 tp_hit = high[bar_idx] >= tp_prices[i]
                 sl_hit = low[bar_idx] <= sl_prices[i]
 
                 if tp_hit and sl_hit:
-                    if abs(open_[bar_idx] - tp_prices[i]) < abs(open_[bar_idx] - sl_prices[i]):
-                        labels[i], exit_reasons[i], exit_prices[i] = Label.BUY, ExitReason.TP_HIT, tp_prices[i]
+                    # Both barriers hit - determine which was likely hit first
+                    open_to_tp = abs(open_[bar_idx] - tp_prices[i])
+                    open_to_sl = abs(open_[bar_idx] - sl_prices[i])
+
+                    if open_to_tp < open_to_sl:
+                        labels[i] = Label.BUY
+                        exit_reasons[i] = ExitReason.TP_HIT
+                        exit_prices[i] = tp_prices[i]
                     else:
-                        labels[i], exit_reasons[i], exit_prices[i] = Label.SELL, ExitReason.SL_HIT, sl_prices[i]
+                        labels[i] = Label.SELL
+                        exit_reasons[i] = ExitReason.SL_HIT
+                        exit_prices[i] = sl_prices[i]
+
                     exit_bar_offsets[i] = j
                     break
                 if tp_hit:
-                    labels[i], exit_reasons[i], exit_prices[i] = Label.BUY, ExitReason.TP_HIT, tp_prices[i]
+                    labels[i] = Label.BUY
+                    exit_reasons[i] = ExitReason.TP_HIT
+                    exit_prices[i] = tp_prices[i]
                     exit_bar_offsets[i] = j
                     break
                 if sl_hit:
-                    labels[i], exit_reasons[i], exit_prices[i] = Label.SELL, ExitReason.SL_HIT, sl_prices[i]
+                    labels[i] = Label.SELL
+                    exit_reasons[i] = ExitReason.SL_HIT
+                    exit_prices[i] = sl_prices[i]
                     exit_bar_offsets[i] = j
                     break
 
+            # Handle timeout
             if exit_reasons[i] == ExitReason.TIME_OUT:
                 exit_idx = min(i + max_periods, n - 1)
                 exit_prices[i] = close[exit_idx]
                 exit_bar_offsets[i] = exit_idx - i
+
                 final_return = (exit_prices[i] - entry_prices[i]) / (entry_prices[i] + epsilon)
+
                 if final_return > epsilon:
                     labels[i] = Label.BUY
                 elif final_return < -epsilon:
@@ -261,17 +357,19 @@ class OptimizedTripleBarrierLabeler:
         instrument_id: int,
         df: pd.DataFrame,
         results: tuple,
+        entry_prices: np.ndarray,
+        tp_prices: np.ndarray,
+        sl_prices: np.ndarray,
         tp_multipliers: np.ndarray,
         sl_multipliers: np.ndarray,
         timeframe: str,
     ) -> pd.DataFrame:
         """Prepare labels DataFrame with all required fields."""
         labels, exit_offsets, exit_prices, exit_reasons, mfe, mae = results
-        tp_prices = df["close"].values * (1 + tp_multipliers * df["atr"].values / df["close"].values)
-        sl_prices = df["close"].values * (1 - sl_multipliers * df["atr"].values / df["close"].values)
-        barrier_returns = (exit_prices - df["close"].values) / (df["close"].values + self.config.epsilon)
-        potential_profit = tp_prices - df["close"].values
-        potential_loss = df["close"].values - sl_prices
+
+        barrier_returns = (exit_prices - entry_prices) / (entry_prices + self.config.epsilon)
+        potential_profit = tp_prices - entry_prices
+        potential_loss = entry_prices - sl_prices
         risk_reward_ratio = potential_profit / (potential_loss + 1e-10)
 
         # Ensure we have a timestamp column
@@ -301,7 +399,7 @@ class OptimizedTripleBarrierLabeler:
                 "label": labels,
                 "exit_reason": [ExitReason(r).name for r in exit_reasons],
                 "exit_bar_offset": exit_offsets,
-                "entry_price": df["close"].values,
+                "entry_price": entry_prices,
                 "exit_price": exit_prices,
                 "tp_price": tp_prices,
                 "sl_price": sl_prices,
@@ -315,7 +413,9 @@ class OptimizedTripleBarrierLabeler:
             }
         )
 
-        valid_mask = result_df["exit_reason"] != ExitReason.INSUFFICIENT_DATA.name
+        valid_mask = (result_df["exit_reason"] != ExitReason.INSUFFICIENT_DATA.name) & (
+            ~pd.isna(result_df["entry_price"])
+        )
         result_df = result_df[valid_mask].copy()
         result_df["return_per_bar"] = result_df["barrier_return"] / result_df["exit_bar_offset"]
         result_df["efficiency"] = result_df["barrier_return"] / (result_df["max_favorable_excursion"] + 1e-10)
@@ -325,27 +425,80 @@ class OptimizedTripleBarrierLabeler:
     async def process_symbol(
         self, instrument_id: int, symbol: str, df: pd.DataFrame, timeframe: str = "15min"
     ) -> Optional[LabelingStats]:
-        """Process a symbol and generate labels with comprehensive statistics."""
+        """Process a symbol with production safeguards."""
         start_time = datetime.now()
         loop = asyncio.get_running_loop()
 
         try:
             logger.info(f"Processing {symbol} (ID: {instrument_id}) with {len(df):,} bars")
+
+            # DATA VALIDATION FIRST
+            required_cols = {"open", "high", "low", "close"}
+            missing_cols = required_cols - set(df.columns)
+            if missing_cols:
+                logger.error(f"Missing required columns for {symbol}: {missing_cols}")
+                return None
+
+            # Data quality checks
+            if (df["high"] < df["low"]).any():
+                logger.error(f"Data quality issue for {symbol}: high < low")
+                return None
+
+            if df["close"].isna().sum() > len(df) * 0.01:
+                logger.error(f"Too many missing values for {symbol}: {df['close'].isna().sum()}")
+                return None
+
+            # Check for zero or negative prices
+            price_cols = ["open", "high", "low", "close"]
+            if (df[price_cols] <= 0).any().any():
+                logger.error(f"Invalid prices (<=0) found for {symbol}")
+                return None
+
+            # STANDARDIZE TIMESTAMP EARLY
+            if df.index.name == "timestamp" or isinstance(df.index, pd.DatetimeIndex):
+                df = df.reset_index()
+
+            if "timestamp" not in df.columns:
+                if "ts" in df.columns:
+                    df["timestamp"] = pd.to_datetime(df["ts"])
+                elif "time" in df.columns:
+                    df["timestamp"] = pd.to_datetime(df["time"])
+                elif "date" in df.columns:
+                    df["timestamp"] = pd.to_datetime(df["date"])
+                else:
+                    logger.error(f"No timestamp column found for {symbol}")
+                    return None
+            else:
+                df["timestamp"] = pd.to_datetime(df["timestamp"])
+
+            # Check for sufficient data
             if len(df) < self.config.min_bars_required:
                 logger.warning(f"Insufficient data for {symbol}: {len(df)} < {self.config.min_bars_required}")
                 return None
 
-            if "ts" in df.columns and "timestamp" not in df.columns:
-                df["timestamp"] = df["ts"]
+            # Sort by timestamp and reset index
             df_sorted = df.sort_values("timestamp").reset_index(drop=True)
 
-            # --- SUGGESTION IMPLEMENTED: Pass symbol to ATR calculation ---
+            # Remove any duplicate timestamps
+            if df_sorted["timestamp"].duplicated().any():
+                logger.warning(f"Duplicate timestamps found for {symbol}, keeping first occurrence")
+                df_sorted = df_sorted.drop_duplicates(subset=["timestamp"], keep="first")
+
+            # Continue with processing...
             df_sorted["atr"] = self._calculate_atr(df_sorted, symbol)
 
-            tp_multipliers, sl_multipliers = self._calculate_dynamic_barriers(df_sorted, df_sorted["atr"].values)
-            entry_prices = df_sorted["close"].values
-            tp_prices = entry_prices + tp_multipliers * df_sorted["atr"].values
-            sl_prices = entry_prices - sl_multipliers * df_sorted["atr"].values
+            # Use open of next bar as entry price to avoid look-ahead bias
+            entry_prices = df_sorted["open"].shift(-1).values
+            atr_at_entry = df_sorted["atr"].values
+
+            tp_multipliers, sl_multipliers = self._calculate_dynamic_barriers(df_sorted, atr_at_entry)
+            tp_prices = entry_prices + tp_multipliers * atr_at_entry
+            sl_prices = entry_prices - sl_multipliers * atr_at_entry
+
+            # Ensure last entry price is NaN as there's no next bar to enter on
+            entry_prices[-1] = np.nan
+            tp_prices[-1] = np.nan
+            sl_prices[-1] = np.nan
 
             results = await loop.run_in_executor(
                 self.executor,
@@ -362,13 +515,21 @@ class OptimizedTripleBarrierLabeler:
             )
 
             labeled_df = self._prepare_labels_dataframe(
-                instrument_id, df_sorted, results, tp_multipliers, sl_multipliers, timeframe
+                instrument_id,
+                df_sorted,
+                results,
+                entry_prices,
+                tp_prices,
+                sl_prices,
+                tp_multipliers,
+                sl_multipliers,
+                timeframe,
             )
             if labeled_df.empty:
                 logger.warning(f"No valid labels generated for {symbol}")
                 return None
 
-            stats = self._calculate_statistics(symbol, df_sorted, labeled_df, start_time)
+            stats = self._calculate_statistics(symbol, df_sorted, labeled_df, start_time, timeframe)
 
             if not labeled_df.empty:
                 labels_to_insert = [LabelData(**row) for row in labeled_df.to_dict("records")]
@@ -383,8 +544,46 @@ class OptimizedTripleBarrierLabeler:
             logger.error(f"Failed to process {symbol}: {e}", exc_info=True)
             return None
 
+    def _get_annualization_factor(self, timeframe: str) -> float:
+        """
+        Calculate annualization factor for Sharpe ratio.
+        Handles various timeframe formats robustly.
+        """
+        timeframe = str(timeframe).upper().replace(" ", "")
+
+        # Indian markets (NSE/BSE): 375 minutes per day, 252 trading days
+        # Adjust these values based on your market
+        MINUTES_PER_DAY = 375
+        DAYS_PER_YEAR = 252
+
+        # Parse numeric value and unit
+        import re
+
+        match = re.match(r"(\d+)([A-Z]+)", timeframe)
+        if not match:
+            logger.warning(f"Could not parse timeframe '{timeframe}', defaulting to daily")
+            return DAYS_PER_YEAR
+
+        value = int(match.group(1))
+        unit = match.group(2)
+
+        if "MIN" in unit:
+            bars_per_day = MINUTES_PER_DAY / value
+            return bars_per_day * DAYS_PER_YEAR
+        if "H" in unit or "HOUR" in unit:
+            bars_per_day = MINUTES_PER_DAY / (value * 60)
+            return bars_per_day * DAYS_PER_YEAR
+        if "D" in unit or "DAY" in unit:
+            return DAYS_PER_YEAR / value
+        if "W" in unit or "WEEK" in unit:
+            return 52 / value
+        if "M" in unit or "MONTH" in unit:
+            return 12 / value
+        logger.warning(f"Unknown timeframe unit '{unit}', defaulting to daily")
+        return DAYS_PER_YEAR
+
     def _calculate_statistics(
-        self, symbol: str, original_df: pd.DataFrame, labeled_df: pd.DataFrame, start_time: datetime
+        self, symbol: str, original_df: pd.DataFrame, labeled_df: pd.DataFrame, start_time: datetime, timeframe: str
     ) -> LabelingStats:
         """Calculate comprehensive labeling statistics."""
         label_counts = labeled_df["label"].value_counts().to_dict()
@@ -404,13 +603,33 @@ class OptimizedTripleBarrierLabeler:
         exit_reason_counts = labeled_df["exit_reason"].value_counts().to_dict()
         avg_holding = labeled_df["exit_bar_offset"].mean()
         returns = labeled_df["barrier_return"]
-        sharpe_ratio = np.sqrt(252) * returns.mean() / (returns.std() + 1e-10)
 
-        # --- SUGGESTION IMPLEMENTED: Correct win rate calculation ---
-        buy_trades = labeled_df[labeled_df["label"] == Label.BUY]
-        sell_trades = labeled_df[labeled_df["label"] == Label.SELL]
-        total_directional_trades = len(buy_trades) + len(sell_trades)
-        win_rate = len(buy_trades) / max(1, total_directional_trades)
+        annualization_factor = self._get_annualization_factor(timeframe)
+        sharpe_ratio = np.sqrt(annualization_factor) * returns.mean() / (returns.std() + 1e-10)
+
+        # CORRECTED WIN RATE LOGIC
+        # Consider only trades that hit either TP or SL as conclusive outcomes
+        conclusive_trades = labeled_df[labeled_df["exit_reason"].isin([ExitReason.TP_HIT.name, ExitReason.SL_HIT.name])]
+
+        if not conclusive_trades.empty:
+            successful_trades = conclusive_trades[conclusive_trades["exit_reason"] == ExitReason.TP_HIT.name]
+            win_rate = len(successful_trades) / len(conclusive_trades)
+        else:
+            win_rate = 0.0  # or np.nan
+
+        # Add profit factor
+        tp_returns = labeled_df[labeled_df["exit_reason"] == ExitReason.TP_HIT.name]["barrier_return"]
+        sl_returns = labeled_df[labeled_df["exit_reason"] == ExitReason.SL_HIT.name]["barrier_return"]
+
+        gross_profits = tp_returns[tp_returns > 0].sum() if len(tp_returns) > 0 else 0
+        gross_losses = abs(sl_returns[sl_returns < 0].sum()) if len(sl_returns) > 0 else 0
+
+        if gross_losses > 0:
+            profit_factor = gross_profits / gross_losses
+        elif gross_profits > 0:
+            profit_factor = float("inf")
+        else:
+            profit_factor = 0.0
 
         data_quality = len(labeled_df) / len(original_df) * 100
         processing_time = (datetime.now() - start_time).total_seconds() * 1000
@@ -427,7 +646,58 @@ class OptimizedTripleBarrierLabeler:
             data_quality_score=data_quality,
             sharpe_ratio=sharpe_ratio,
             win_rate=win_rate,
+            profit_factor=profit_factor,
         )
+
+    def calculate_sample_weights(self, labeled_df: pd.DataFrame) -> NDArray[np.float64]:
+        """
+        Calculate sample weights based on label uniqueness.
+        Implements methodology from AFML Chapter 4.
+
+        Args:
+            labeled_df: DataFrame with labels
+
+        Returns:
+            Array of sample weights
+        """
+        n = len(labeled_df)
+        weights = np.ones(n)
+
+        # Sort by timestamp
+        df = labeled_df.sort_values("ts").reset_index(drop=True)
+
+        # Calculate overlaps
+        for i in range(n):
+            start_i = i
+            end_i = i + df.iloc[i]["exit_bar_offset"]
+
+            overlap_count = 0
+            total_overlap = 0.0
+
+            for j in range(n):
+                if i == j:
+                    continue
+
+                start_j = j
+                end_j = j + df.iloc[j]["exit_bar_offset"]
+
+                # Check for overlap
+                if start_i <= end_j and end_i >= start_j:
+                    overlap_start = max(start_i, start_j)
+                    overlap_end = min(end_i, end_j)
+                    overlap_fraction = (overlap_end - overlap_start + 1) / (end_i - start_i + 1)
+                    total_overlap += overlap_fraction
+                    overlap_count += 1
+
+            # Weight inversely proportional to average overlap
+            if overlap_count > 0:
+                avg_overlap = total_overlap / overlap_count
+                weights[i] = np.exp(-self.config.sample_weight_decay_factor * avg_overlap)
+            else:
+                weights[i] = 1.0
+
+        # Normalize weights
+        return weights / weights.sum() * len(weights)
 
     async def process_symbols_parallel(self, symbol_data: dict[int, dict[str, Any]]) -> dict[str, LabelingStats]:
         """Process multiple symbols in parallel with progress tracking."""

@@ -111,14 +111,101 @@ class KiteRESTClient:
             logger.error(f"Unexpected error fetching historical data for {instrument_token}: {e}")
             return None
 
+    async def get_instruments_csv(self) -> Optional[list[dict[str, Any]]]:
+        """
+        Fetches the complete instrument list from Zerodha in CSV format.
+        This is the optimized approach recommended by Zerodha documentation.
+        Downloads a gzipped CSV dump of all instruments across all exchanges.
+        """
+        if not self.general_api_rate_limiter:
+            raise RuntimeError("KiteRESTClient not initialized. Call initialize() first.")
+
+        self._update_access_token()
+
+        try:
+            async with self.general_api_rate_limiter:
+                logger.info("Fetching complete instrument list in CSV format...")
+
+                import csv
+                import gzip
+                import io
+
+                import httpx
+
+                # Zerodha instruments CSV URL
+                url = "https://api.kite.trade/instruments"
+                headers = {
+                    "X-Kite-Version": "3",
+                    "Authorization": f"token {self.api_key}:{self.token_manager.get_access_token()}",
+                }
+
+                # Download the gzipped CSV
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    response = await client.get(url, headers=headers)
+                    response.raise_for_status()
+
+                    # Decompress gzipped content
+                    decompressed_data = gzip.decompress(response.content)
+                    csv_content = decompressed_data.decode("utf-8")
+
+                    # Parse CSV content
+                    csv_reader = csv.DictReader(io.StringIO(csv_content))
+                    instruments = []
+
+                    for row in csv_reader:
+                        # Convert types for consistency with KiteConnect API
+                        instrument = {
+                            "instrument_token": int(row["instrument_token"]) if row["instrument_token"] else 0,
+                            "exchange_token": row["exchange_token"] if row["exchange_token"] else None,
+                            "tradingsymbol": row["tradingsymbol"],
+                            "name": row["name"] if row["name"] else None,
+                            "last_price": float(row["last_price"]) if row["last_price"] else None,
+                            "expiry": row["expiry"] if row["expiry"] else None,
+                            "strike": float(row["strike"]) if row["strike"] else None,
+                            "tick_size": float(row["tick_size"]) if row["tick_size"] else None,
+                            "lot_size": int(row["lot_size"]) if row["lot_size"] else None,
+                            "instrument_type": row["instrument_type"],
+                            "segment": row["segment"],
+                            "exchange": row["exchange"],
+                        }
+                        instruments.append(instrument)
+
+                    logger.info(f"Successfully parsed {len(instruments)} instruments from CSV")
+                    return instruments
+
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 403:
+                logger.error("Authentication failed - invalid access token for instruments CSV")
+            else:
+                logger.error(f"HTTP error fetching instruments CSV: {e.response.status_code}")
+            return None
+        except httpx.RequestError as e:
+            logger.error(f"Network error fetching instruments CSV: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"Unexpected error fetching instruments CSV: {e}")
+            return None
+
     async def get_instruments(self, exchange: Optional[str] = None) -> Optional[list[dict[str, Any]]]:
         """
         Fetches the list of instruments.
-        Applies rate limiting before making the API call.
+        Uses optimized CSV approach for better performance.
+        Falls back to legacy API if CSV approach fails.
         """
         if not self.kite or not self.general_api_rate_limiter:
             raise RuntimeError("KiteRESTClient not initialized. Call initialize() first.")
 
+        # Try optimized CSV approach first
+        instruments = await self.get_instruments_csv()
+        if instruments:
+            # Filter by exchange if specified
+            if exchange:
+                instruments = [inst for inst in instruments if inst["exchange"] == exchange]
+                logger.info(f"Filtered to {len(instruments)} instruments for exchange: {exchange}")
+            return instruments
+
+        # Fallback to legacy API approach
+        logger.warning("CSV approach failed, falling back to legacy instruments API")
         self._update_access_token()
         try:
             async with self.general_api_rate_limiter:

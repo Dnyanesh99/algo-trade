@@ -48,9 +48,12 @@ class HistoricalFetcher:
 
     def __init__(self, rest_client: KiteRESTClient):
         config = ConfigLoader().get_config()
-        assert config.data_pipeline is not None
-        assert config.broker is not None
-        assert config.performance is not None
+        if config.data_pipeline is None:
+            raise ValueError("Data pipeline configuration is required")
+        if config.broker is None:
+            raise ValueError("Broker configuration is required")
+        if config.performance is None:
+            raise ValueError("Performance configuration is required")
         self.rest_client = rest_client
         self.max_days_per_request = config.data_pipeline.historical_data_max_days_per_request
         self.historical_interval = config.broker.historical_interval

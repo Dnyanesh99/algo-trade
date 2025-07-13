@@ -15,6 +15,9 @@ class SystemConfig(StrictBaseModel):
     version: str
     mode: Literal["HISTORICAL_MODE", "LIVE_MODE"]
     timezone: str
+    openmp_threads: int = 1
+    mkl_threads: int = 1
+    numexpr_threads: int = 1
 
 
 class ConnectionManagerConfig(StrictBaseModel):
@@ -31,6 +34,7 @@ class BrokerConfig(StrictBaseModel):
     websocket_mode: Literal["LTP", "QUOTE", "FULL"]
     historical_interval: Literal["minute", "3minute", "5minute", "10minute", "15minute", "30minute", "60minute", "day"]
     should_fetch_instruments: bool = False
+    exchange_types: list[str] = Field(default_factory=list)
     connection_manager: ConnectionManagerConfig
 
 
@@ -59,6 +63,8 @@ class LabelingConfig(StrictBaseModel):
     correlation_threshold: float = Field(default=0.7, ge=0, le=1)
     min_return_threshold: float = Field(default=0.001, gt=0)
     barrier_adjustment_factor: float = Field(default=1.0, gt=0)
+    ohlcv_data_limit_for_labeling: int = Field(default=1000, gt=0)
+    minimum_ohlcv_data_for_labeling: int = Field(default=100, gt=0)
     label_threshold: float = Field(default=0.5, ge=0, le=1)
 
     @model_validator(mode="after")
@@ -264,6 +270,7 @@ class FeatureSelectionConfig(StrictBaseModel):
     consistency_weight: float = Field(default=0.3, ge=0.0, le=1.0)
     importance_weight: float = Field(default=0.4, ge=0.0, le=1.0)
     min_selection_frequency: float = Field(default=0.2, ge=0.0, le=1.0)
+    correlation_data_lookback_multiplier: int = Field(default=7, gt=0)
 
 
 class CrossAssetConfig(StrictBaseModel):
@@ -301,6 +308,8 @@ class ModelTrainingConfig(StrictBaseModel):
     feature_engineering: FeatureEngineeringConfig = Field(default_factory=FeatureEngineeringConfig)
     class_label_mapping: dict[int, str]
     top_n_features: int = Field(gt=0)
+    optimize_hyperparams: bool = False
+    feature_ranges: Optional[dict[str, list[float]]] = None
 
 
 class ExampleConfig(StrictBaseModel):
@@ -383,6 +392,8 @@ class DataQualityConfig(StrictBaseModel):
 class SchedulerConfig(StrictBaseModel):
     prediction_interval_minutes: int = Field(gt=0)
     readiness_check_time: str
+    live_mode_sleep_duration: int = Field(default=3600, gt=0)
+    prediction_timeframe: str = "15min"
 
 
 class HealthMonitorConfig(StrictBaseModel):
@@ -491,11 +502,11 @@ class AppConfig(StrictBaseModel):
     model_training: ModelTrainingConfig
     candle_buffer: CandleBufferConfig
     data_pipeline: DataPipelineConfig
+    database: DatabaseConfig
 
     # Optional sections
     api_rate_limits: Optional[ApiRateLimits] = None
     storage: Optional[StorageConfig] = None
-    database: Optional[DatabaseConfig] = None
     example: Optional[ExampleConfig] = None
     statistics: Optional[StatisticsConfig] = None
     market_calendar: Optional[MarketCalendarConfig] = None
@@ -548,6 +559,30 @@ class ConfigLoader:
                     except FileNotFoundError:
                         # Metrics config is optional
                         pass
+
+                # Load environment-based configurations
+                # Broker configuration: credentials from environment, other settings from YAML
+                if "broker" in config_data:
+                    yaml_broker = config_data["broker"].copy()
+                    # Load credentials from environment variables
+                    import os
+
+                    api_key = os.getenv("KITE_API_KEY")
+                    api_secret = os.getenv("KITE_API_SECRET")
+
+                    if not api_key:
+                        raise ValueError("KITE_API_KEY environment variable is required but not set")
+                    if not api_secret:
+                        raise ValueError("KITE_API_SECRET environment variable is required but not set")
+
+                    yaml_broker["api_key"] = api_key
+                    yaml_broker["api_secret"] = api_secret
+                    config_data["broker"] = yaml_broker
+                else:
+                    # No broker section in YAML - this should not happen in our case
+                    raise ValueError("Broker configuration section is required in config.yaml")
+
+                self._config = AppConfig(**config_data)
 
                 self._config = AppConfig(**config_data)
             except FileNotFoundError:

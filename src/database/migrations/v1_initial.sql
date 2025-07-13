@@ -99,25 +99,15 @@ CREATE TABLE ohlcv_60min (
 SELECT create_hypertable('ohlcv_60min', 'ts', chunk_time_interval => INTERVAL '7 days');
 
 -- =================================================================
---  3. COMPRESSION POLICIES FOR OHLCV TABLES
---  To optimize storage and query speed on historical data.
+--  3. COMPRESSION SETTINGS FOR OHLCV TABLES
+--  Configure compression but policies are applied in v4_policies.sql
 -- =================================================================
 
--- Compression for 1-min data after 1 day (most recent data)
+-- Enable compression for OHLCV tables (policies applied later in v4)
 ALTER TABLE ohlcv_1min SET (timescaledb.compress, timescaledb.compress_segmentby = 'instrument_id', timescaledb.compress_orderby = 'ts DESC');
-SELECT add_compression_policy('ohlcv_1min', INTERVAL '1 day');
-
--- Compression for 5-min data after 7 days
 ALTER TABLE ohlcv_5min SET (timescaledb.compress, timescaledb.compress_segmentby = 'instrument_id', timescaledb.compress_orderby = 'ts DESC');
-SELECT add_compression_policy('ohlcv_5min', INTERVAL '7 days');
-
--- Compression for 15-min data after 15 days
 ALTER TABLE ohlcv_15min SET (timescaledb.compress, timescaledb.compress_segmentby = 'instrument_id', timescaledb.compress_orderby = 'ts DESC');
-SELECT add_compression_policy('ohlcv_15min', INTERVAL '15 days');
-
--- Compression for 60-min data after 30 days
 ALTER TABLE ohlcv_60min SET (timescaledb.compress, timescaledb.compress_segmentby = 'instrument_id', timescaledb.compress_orderby = 'ts DESC');
-SELECT add_compression_policy('ohlcv_60min', INTERVAL '30 days');
 
 
 -- =================================================================
@@ -164,9 +154,8 @@ CREATE INDEX idx_signals_type ON signals (signal_type);
 CREATE INDEX idx_signals_direction ON signals (direction);
 CREATE INDEX idx_signals_source_feature ON signals (source_feature_name);
 
--- Add compression policy for signals older than 30 days
+-- Enable compression for signals (policy applied in v4_policies.sql)
 ALTER TABLE signals SET (timescaledb.compress, timescaledb.compress_segmentby = 'instrument_id', timescaledb.compress_orderby = 'ts DESC');
-SELECT add_compression_policy('signals', INTERVAL '30 days');
 
 -- =================================================================
 --  6. LABELS TABLE (HYPERTABLE)
@@ -197,9 +186,8 @@ CREATE INDEX idx_labels_label ON labels (label);
 CREATE INDEX idx_labels_timeframe ON labels (timeframe);
 CREATE INDEX idx_labels_exit_reason ON labels (exit_reason);
 
--- Add compression policy for labels older than 60 days
+-- Enable compression for labels (policy applied in v4_policies.sql)
 ALTER TABLE labels SET (timescaledb.compress, timescaledb.compress_segmentby = 'instrument_id', timescaledb.compress_orderby = 'ts DESC');
-SELECT add_compression_policy('labels', INTERVAL '60 days');
 
 -- =================================================================
 --  7. MODEL REGISTRY TABLE

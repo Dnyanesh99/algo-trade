@@ -28,7 +28,8 @@ class SignalGenerator:
         health_monitor: HealthMonitor,
         on_signal_generated: Callable[[dict[str, Any]], Any],
     ):
-        assert config.signal_generation is not None
+        if config.signal_generation is None:
+            raise ValueError("Signal generation configuration is required")
         self.signal_repo = signal_repo
         self.error_handler = error_handler
         self.health_monitor = health_monitor

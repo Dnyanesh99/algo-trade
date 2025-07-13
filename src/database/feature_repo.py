@@ -170,7 +170,43 @@ class FeatureRepository:
             logger.error(f"Error fetching training data for {instrument_id} ({timeframe}): {e}")
             raise
 
-    # NEW: Feature Engineering Repository Methods
+    async def get_features_for_correlation(
+        self, instrument_id: int, timeframe: str, start_time: datetime, end_time: datetime
+    ) -> pd.DataFrame:
+        """
+        Fetches features data for a given instrument and timeframe within a time range,
+        and returns them as a single pivoted Pandas DataFrame suitable for correlation calculation.
+        """
+        query = queries.feature_repo["get_features"]
+
+        try:
+            rows = await self.db_manager.fetch_rows(query, instrument_id, timeframe, start_time, end_time)
+            if not rows:
+                logger.info(
+                    f"No feature data found for correlation for {instrument_id} ({timeframe}) from {start_time} to {end_time}."
+                )
+                return pd.DataFrame()
+
+            df = pd.DataFrame([dict(row) for row in rows])
+
+            # Pivot features to wide format
+            df["__temp_id"] = df.groupby(["ts", "feature_name"]).cumcount()
+            pivoted_df = df.pivot_table(
+                index=["ts", "__temp_id"], columns="feature_name", values="feature_value"
+            ).reset_index()
+            pivoted_df = pivoted_df.drop(columns=["__temp_id"])
+            pivoted_df.columns.name = None
+            pivoted_df = pivoted_df.set_index("ts").sort_index()
+
+            logger.debug(
+                f"Fetched and prepared {len(pivoted_df)} feature samples for correlation for {instrument_id} ({timeframe})."
+            )
+            return pivoted_df
+        except Exception as e:
+            logger.error(f"Error fetching features for correlation for {instrument_id} ({timeframe}): {e}")
+            raise
+
+    # Feature Engineering Repository Methods
     async def insert_engineered_features(
         self, instrument_id: int, timeframe: str, engineered_features: list[dict]
     ) -> None:
@@ -222,7 +258,7 @@ class FeatureRepository:
                         (
                             instrument_id,
                             timeframe,
-                            score["timestamp"],
+                            score["training_timestamp"],
                             score["feature_name"],
                             score["importance_score"],
                             score["stability_score"],
@@ -259,6 +295,8 @@ class FeatureRepository:
         instrument_id: int,
         timeframe: str,
         selected_features: list[str],
+        selection_criteria: dict,
+        total_features_available: int,
         selection_method: str,
         model_version: str,
     ) -> None:
@@ -276,7 +314,9 @@ class FeatureRepository:
                     timeframe,
                     timestamp,
                     selected_features,
-                    len(selected_features),
+                    selection_criteria,
+                    total_features_available,
+                    len(selected_features),  # features_selected
                     selection_method,
                     model_version,
                 )

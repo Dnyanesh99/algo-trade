@@ -61,9 +61,12 @@ class HistoricalAggregator:
         self.candle_validator = CandleValidator()
 
         # Configuration from config.yaml
-        assert config.trading is not None
-        assert config.performance is not None
-        assert config.data_quality is not None
+        if config.trading is None:
+            raise ValueError("Trading configuration is required")
+        if config.performance is None:
+            raise ValueError("Performance configuration is required")
+        if config.data_quality is None:
+            raise ValueError("Data quality configuration is required")
         self.timeframes = config.trading.aggregation_timeframes
         self.batch_size = config.performance.processing.batch_size
         self.validation_enabled = config.data_quality.validation.enabled
@@ -164,12 +167,12 @@ class HistoricalAggregator:
                 return None
 
             df_work = one_min_data.copy()
-            if not pd.api.types.is_datetime64_any_dtype(df_work["date"]):
-                df_work["date"] = pd.to_datetime(df_work["date"])
-            df_work = df_work.sort_values("date").set_index("date")
+            if not pd.api.types.is_datetime64_any_dtype(df_work["ts"]):
+                df_work["ts"] = pd.to_datetime(df_work["ts"])
+            df_work = df_work.sort_values("ts").set_index("ts")
 
             if self.validation_enabled:
-                validation_df = df_work.reset_index().rename(columns={"date": "timestamp"})
+                validation_df = df_work.reset_index().rename(columns={"ts": "timestamp"})
                 validation_result = await self.candle_validator.validate_candles(validation_df, instrument_id, "1min")
                 if not validation_result.is_valid:
                     logger.warning(
@@ -210,7 +213,7 @@ class HistoricalAggregator:
             if "oi" in df_prepared.columns:
                 agg_dict["oi"] = "last"
 
-            aggregated_df = df_prepared.resample(timeframe_str, on="timestamp").agg(agg_dict).dropna()
+            aggregated_df = df_prepared.resample(timeframe_str, on="ts").agg(agg_dict).dropna()
 
             if aggregated_df.empty:
                 processing_time = (datetime.now() - tf_start_time).total_seconds() * 1000

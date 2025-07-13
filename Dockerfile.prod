@@ -1,57 +1,25 @@
-# Simple working Dockerfile without TA-lib
-FROM python:3.11-slim
+# Production Dockerfile using pre-built base image
+FROM algo-trading-base:latest
 
-# Set environment variables
-ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1 \
-    LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/usr/local/lib:$LD_LIBRARY_PATH
+# Switch back to root for file operations
+USER root
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    postgresql-client \
-    curl \
-    libgomp1 \
-    libomp-dev \
-    gcc \
-    g++ \
-    && rm -rf /var/lib/apt/lists/*
-
-# Create app directory
-WORKDIR /app
-
-# Upgrade pip and install basic packages
-RUN pip install --upgrade pip setuptools wheel
-
-# Copy requirements and install Python dependencies (excluding TA-lib)
-COPY pyproject.toml .
+# Copy the application source code and configuration
 COPY src ./src
+COPY config ./config
+COPY main.py pyproject.toml ./
 
-# Install Python dependencies without TA-lib
-RUN pip install -e . --no-deps && \
-    pip install pandas numpy scipy scikit-learn lightgbm joblib \
-    pydantic pydantic-settings pyyaml psycopg2-binary asyncpg sqlalchemy \
-    loguru prometheus-client numba psutil pyarrow httpx websockets \
-    aiofiles Flask pytz orjson tqdm typer kiteconnect
+# Install the package in editable mode (dependencies already installed in base image)
+RUN pip install -e .
 
-# Copy the rest of the application
-COPY . .
-
-# Create necessary directories
-RUN mkdir -p logs cache models/artifacts config
-
-# Create non-root user for security with matching UID/GID
-RUN groupadd -r appuser -g 1000 && useradd -r -g appuser -u 1000 appuser && \
-    chown -R appuser:appuser /app
+# Fix ownership for any new files
+RUN chown -R appuser:appuser /app
 
 # Switch to non-root user
 USER appuser
 
 # Expose ports
 EXPOSE 8000 8001
-
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
-    CMD python -c "import sys; sys.exit(0)" || exit 1
 
 # Run the application
 CMD ["python", "main.py"]

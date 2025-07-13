@@ -58,8 +58,10 @@ class FeatureCalculator:
         self.error_handler = error_handler
         self.health_monitor = health_monitor
         self.feature_validator = FeatureValidator()
-        assert config.trading is not None
-        assert config.data_quality is not None
+        if config.trading is None:
+            raise ValueError("Trading configuration is required")
+        if config.data_quality is None:
+            raise ValueError("Data quality configuration is required")
         self.timeframes = config.trading.feature_timeframes
         self.lookback_period = config.trading.features.lookback_period
         self.validation_enabled = config.data_quality.validation.enabled
@@ -79,7 +81,8 @@ class FeatureCalculator:
     def _load_feature_configs(self) -> list[FeatureConfig]:
         """Loads and parses feature configurations from config.yaml."""
         try:
-            assert config.trading is not None and config.trading.features is not None
+            if config.trading is None or config.trading.features is None:
+                raise ValueError("Trading feature configuration is required")
             features_list = config.trading.features.configurations
             return [FeatureConfig(name=fc.name, function=fc.function, params=fc.params) for fc in features_list]
         except Exception as e:

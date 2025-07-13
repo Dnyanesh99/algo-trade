@@ -1,16 +1,31 @@
 # Docker Makefile for Algo Trading System
-.PHONY: help build build-dev up up-dev up-prod down down-dev clean logs logs-dev shell shell-dev db-shell prometheus grafana
+.PHONY: help build build-dev build-base build-prod build-rebuild up up-dev up-prod down down-dev clean logs logs-dev shell shell-dev db-shell prometheus grafana
+
+# Image configuration
+BASE_IMAGE_NAME := algo-trading-base
+BASE_IMAGE_TAG := latest
+PROD_IMAGE_NAME := algo-trade-algo-trade-app
+PROD_IMAGE_TAG := latest
 
 # Default target
 help:
 	@echo "Available commands:"
-	@echo "  build      - Build the Docker image for production"
-	@echo "  build-dev  - Build the Docker image for development"
+	@echo ""
+	@echo "🏗️  BUILD COMMANDS:"
+	@echo "  build-base     - Build base image with dependencies (slow, run when deps change)"
+	@echo "  build-prod     - Build production image (fast, uses base image)"
+	@echo "  build          - Smart build (builds base if needed, then prod)"
+	@echo "  build-rebuild  - Force rebuild both base and production images"
+	@echo "  build-dev      - Build development image"
+	@echo ""
+	@echo "🚀 ENVIRONMENT COMMANDS:"
 	@echo "  up         - Start production environment"
 	@echo "  up-dev     - Start development environment with hot reloading"
 	@echo "  up-prod    - Start full production environment"
 	@echo "  down       - Stop production containers"
 	@echo "  down-dev   - Stop development containers"
+	@echo ""
+	@echo "🔧 UTILITY COMMANDS:"
 	@echo "  clean      - Remove containers, volumes, and images"
 	@echo "  logs       - View production logs"
 	@echo "  logs-dev   - View development logs"
@@ -20,25 +35,77 @@ help:
 	@echo "  prometheus - Open Prometheus in browser"
 	@echo "  grafana    - Open Grafana in browser"
 
-# Build production image
-build:
-	docker-compose build --target production
+# ============================================================================
+# OPTIMIZED BUILD SYSTEM
+# Two-stage build: base image (dependencies) + production image (code)
+# ============================================================================
+
+# Check if base image exists
+check-base:
+	@if docker image inspect $(BASE_IMAGE_NAME):$(BASE_IMAGE_TAG) >/dev/null 2>&1; then \
+		echo "✅ Base image $(BASE_IMAGE_NAME):$(BASE_IMAGE_TAG) exists"; \
+	else \
+		echo "❌ Base image $(BASE_IMAGE_NAME):$(BASE_IMAGE_TAG) not found"; \
+		echo "🔨 Run 'make build-base' to build it first"; \
+		exit 1; \
+	fi
+
+# Build base image with system and Python dependencies (slow, run when deps change)
+build-base:
+	@echo "🔨 Building base image with dependencies..."
+	@echo "⏱️  This may take a while for the first build..."
+	docker build -f Dockerfile.base -t $(BASE_IMAGE_NAME):$(BASE_IMAGE_TAG) .
+	@echo "✅ Base image built successfully!"
+	@echo "📊 Base image size:"
+	@docker images $(BASE_IMAGE_NAME):$(BASE_IMAGE_TAG) --format "table {{.Repository}}\t{{.Tag}}\t{{.Size}}"
+
+# Build production image (fast, uses base image)
+build-prod: check-base
+	@echo "🚀 Building production image (fast build)..."
+	docker build -f Dockerfile.prod -t $(PROD_IMAGE_NAME):$(PROD_IMAGE_TAG) .
+	@echo "✅ Production image built successfully!"
+	@echo "📊 Production image size:"
+	@docker images $(PROD_IMAGE_NAME):$(PROD_IMAGE_TAG) --format "table {{.Repository}}\t{{.Tag}}\t{{.Size}}"
+
+# Smart build: build base only if needed, then build production
+build-base-if-needed:
+	@if ! docker image inspect $(BASE_IMAGE_NAME):$(BASE_IMAGE_TAG) >/dev/null 2>&1; then \
+		echo "🔨 Base image not found, building..."; \
+		$(MAKE) build-base; \
+	else \
+		echo "✅ Base image exists, skipping build"; \
+	fi
+
+# Main build command (smart build)
+build: build-base-if-needed build-prod
+
+# Force rebuild both images (when dependencies change)
+build-rebuild:
+	@echo "🔄 Force rebuilding both base and production images..."
+	docker build --no-cache -f Dockerfile.base -t $(BASE_IMAGE_NAME):$(BASE_IMAGE_TAG) .
+	docker build --no-cache -f Dockerfile.prod -t $(PROD_IMAGE_NAME):$(PROD_IMAGE_TAG) .
+	@echo "✅ Both images rebuilt successfully!"
+	@echo "📊 Image sizes:"
+	@docker images | grep -E "($(BASE_IMAGE_NAME)|$(PROD_IMAGE_NAME))" | head -2
 
 # Build development image
 build-dev:
 	docker compose -f docker-compose.dev.yml build
 
-# Start production environment
-up:
+# Start production environment (with smart build)
+up: build
 	@echo "Creating data directories..."
 	@mkdir -p data/timescaledb data/prometheus data/grafana
 	docker-compose up -d
-	@echo "Production environment started."
+	@echo "✅ Production environment started."
 	@echo "Services available at:"
 	@echo "  - Application: http://localhost:8000"
 	@echo "  - Grafana: http://localhost:3000 (admin/admin123)"
 	@echo "  - Prometheus: http://localhost:9090"
 	@echo "  - TimescaleDB: localhost:15432"
+	@echo ""
+	@echo "📜 View logs: make logs"
+	@echo "🔍 Check health: make health"
 
 # Start development environment with hot reloading
 up-dev:
@@ -142,3 +209,41 @@ ifdef BACKUP
 else
 	@echo "Please specify BACKUP file: make restore-db BACKUP=backups/backup_YYYYMMDD_HHMMSS.sql"
 endif
+
+# ============================================================================
+# ADDITIONAL UTILITY COMMANDS FOR OPTIMIZED WORKFLOW
+# ============================================================================
+
+# Quick restart after code changes (fast)
+restart-app: build-prod
+	@echo "🔄 Restarting application container..."
+	docker-compose down algo-trade-app
+	docker-compose up -d algo-trade-app
+	@echo "✅ Application container restarted!"
+
+# Development workflow: build and start with logs
+dev: build up logs
+
+# Show Docker system info and image sizes
+info:
+	@echo "🐳 Docker system information:"
+	@echo "============================================"
+	@docker system df
+	@echo ""
+	@echo "📊 Current containers:"
+	@docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+	@echo ""
+	@echo "🖼️  Algo-trading images:"
+	@docker images | grep -E "($(BASE_IMAGE_NAME)|$(PROD_IMAGE_NAME)|algo-trade)" || echo "No algo-trading images found"
+
+# Clean up all algo-trading related Docker resources
+clean-all:
+	@echo "🧹 Cleaning up all algo-trading Docker resources..."
+	docker-compose down -v --rmi all
+	-docker rmi $(BASE_IMAGE_NAME):$(BASE_IMAGE_TAG) 2>/dev/null
+	-docker rmi $(PROD_IMAGE_NAME):$(PROD_IMAGE_TAG) 2>/dev/null
+	docker system prune -f
+	@echo "✅ All resources cleaned up!"
+
+# Update .PHONY targets
+.PHONY: check-base build-base build-prod build-base-if-needed build-rebuild restart-app dev info clean-all

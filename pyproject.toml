@@ -34,7 +34,7 @@ dependencies = [
     "prometheus-client>=0.19.0", # Added for metrics
     
     # Technical Analysis
-    "ta-lib", # No newer version found (Note: ta-lib often requires manual installation/binaries)
+    # "ta-lib", # Commented out - using pandas fallback implementation
     "numba>=0.61.2", # Updated from 0.58.0 to 0.61.2
     # Performance & Memory
     "psutil>=5.9.0", # No newer version found
@@ -57,6 +57,9 @@ dependencies = [
     
     # Development utilities
     "typer>=0.9.0", # No newer version found
+    
+    # Hyperparameter optimization
+    "optuna>=3.5.0", # Moved from dev dependencies - needed for LGBMTrainer
 ]
 requires-python = ">=3.9"
 readme = "README.md"
@@ -77,12 +80,14 @@ dev = [
     "mypy>=1.16.0", # No newer version found
     "bandit>=1.8.5", # Updated from 1.7.5 to 1.8.5
     
+    # Development tools
+    "watchdog[watchmedo]>=3.0.0", # For file monitoring and auto-restart
+    
     # Analysis & Visualization
     "jupyter>=1.0.0", # No newer version found
     "plotly>=5.17.0", # No newer version found
     "seaborn>=0.12.0", # No newer version found
     "matplotlib>=3.10.3", # Updated from 3.8.0 to 3.10.3
-    "optuna>=3.5.0",
     
     # Documentation
     "mkdocs>=1.6.1", # Updated from 1.5.0 to 1.6.1
