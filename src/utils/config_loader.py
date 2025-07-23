@@ -1,14 +1,27 @@
 from datetime import date, time
-from typing import Any, Literal, Optional, Union
+from typing import Any, Dict, Literal, Optional, Union
 
 import yaml
 from pydantic import BaseModel, Field, ValidationError, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from src.utils.logger import LOGGER as logger
+
 
 # Base model for all configuration classes to enforce strict validation
 class StrictBaseModel(BaseModel):
     model_config = SettingsConfigDict(extra="forbid")
+
+
+class MarketSessionTime(StrictBaseModel):
+    start: str = Field(pattern=r'^\d{2}:\d{2}$')  # HH:MM format
+    end: str = Field(pattern=r'^\d{2}:\d{2}$')    # HH:MM format
+
+
+class PathDependentTimeoutConfig(StrictBaseModel):
+    enabled: bool = True
+    upper_threshold: float = Field(default=0.5, ge=-1, le=1)
+    lower_threshold: float = Field(default=-0.5, ge=-1, le=1)
 
 
 class SystemConfig(StrictBaseModel):
@@ -34,7 +47,8 @@ class BrokerConfig(StrictBaseModel):
     websocket_mode: Literal["LTP", "QUOTE", "FULL"]
     historical_interval: Literal["minute", "3minute", "5minute", "10minute", "15minute", "30minute", "60minute", "day"]
     should_fetch_instruments: bool = False
-    exchange_types: list[str] = Field(default_factory=list)
+    # 🔧 MIGRATION: historical_data_lookback_days moved to model_training section for consistency
+    segment_types: list[str] = Field(default_factory=list)
     connection_manager: ConnectionManagerConfig
 
 
@@ -47,25 +61,53 @@ class LoggingConfig(StrictBaseModel):
     compression: str = "zip"
 
 
+class DynamicEpsilonConfig(StrictBaseModel):
+    low_volatility_multiplier: float = Field(default=1.5, gt=0)
+    normal_volatility_multiplier: float = Field(default=1.0, gt=0)
+    high_volatility_multiplier: float = Field(default=0.7, gt=0)
+    extreme_volatility_multiplier: float = Field(default=2.0, gt=0)
+    low_volatility_threshold: float = Field(default=0.5, gt=0)
+    high_volatility_threshold: float = Field(default=1.5, gt=0)
+    extreme_volatility_threshold: float = Field(default=2.5, gt=0)
+    market_open_multiplier: float = Field(default=0.8, gt=0)
+    pre_lunch_multiplier: float = Field(default=1.3, gt=0)
+    market_close_multiplier: float = Field(default=0.9, gt=0)
+    monday_multiplier: float = Field(default=1.1, gt=0)
+    friday_multiplier: float = Field(default=0.85, gt=0)
+    extreme_zscore_threshold: float = Field(default=2.5, gt=0)
+    moderate_zscore_threshold: float = Field(default=1.5, gt=0)
+    stable_zscore_threshold: float = Field(default=0.5, gt=0)
+    extreme_zscore_multiplier: float = Field(default=1.5, gt=0)
+    moderate_zscore_multiplier: float = Field(default=1.2, gt=0)
+    stable_zscore_multiplier: float = Field(default=0.9, gt=0)
+    min_epsilon_multiplier: float = Field(default=0.3, gt=0)
+    max_epsilon_multiplier: float = Field(default=3.0, gt=0)
+    weekly_expiry_day: int = Field(default=4, ge=0, le=6)  # 0=Monday, 6=Sunday
+    monthly_expiry_week: int = Field(default=-1, ge=-1, le=4)  # -1=last week
+    expiry_volatility_multiplier: float = Field(default=0.75, gt=0)
+    market_session_times: Optional[Dict[str, MarketSessionTime]] = None
+
+
 class LabelingConfig(StrictBaseModel):
     atr_period: int = Field(gt=0)
     tp_atr_multiplier: float = Field(gt=0)
     sl_atr_multiplier: float = Field(gt=0)
     max_holding_periods: int = Field(gt=0)
-    close_open_threshold: float = Field(ge=0, le=1)
     min_bars_required: int = Field(gt=0)
     epsilon: float = Field(gt=0)
     atr_smoothing: Literal["ema", "sma"]
     use_dynamic_barriers: bool = True
+    use_dynamic_epsilon: bool = Field(default=False)
     volatility_lookback: int = Field(default=20, gt=0)
-    max_position_size: float = Field(default=1.0, gt=0)
-    min_price_change: float = Field(default=0.001, gt=0)
-    correlation_threshold: float = Field(default=0.7, ge=0, le=1)
-    min_return_threshold: float = Field(default=0.001, gt=0)
-    barrier_adjustment_factor: float = Field(default=1.0, gt=0)
-    ohlcv_data_limit_for_labeling: int = Field(default=1000, gt=0)
-    minimum_ohlcv_data_for_labeling: int = Field(default=100, gt=0)
-    label_threshold: float = Field(default=0.5, ge=0, le=1)
+    atr_cache_size: int = Field(default=100, gt=0)
+    dynamic_barrier_tp_sensitivity: float = Field(default=0.2, gt=0)
+    dynamic_barrier_sl_sensitivity: float = Field(default=0.1, gt=0)
+    sample_weight_decay_factor: float = Field(default=0.5, gt=0)
+    dynamic_epsilon: DynamicEpsilonConfig = Field(default_factory=DynamicEpsilonConfig)
+    path_dependent_timeout: Optional[PathDependentTimeoutConfig] = None
+    # Data fetching limits for main.py operations (not used by labeler algorithm)
+    ohlcv_data_limit_for_labeling: int = Field(default=5000, gt=0)  # Reasonable limit for DB query performance
+    minimum_ohlcv_data_for_labeling: int = Field(default=200, gt=0)  # Must have enough data before labeling
 
     @model_validator(mode="after")
     def check_atr_period_and_min_bars(self) -> "LabelingConfig":
@@ -101,6 +143,20 @@ class TradingFeaturesConfig(StrictBaseModel):
     volume_sma: Optional[FeatureConfig] = None
     configurations: list[FeatureConfiguration] = Field(default_factory=list)
     name_mapping: dict[str, str] = Field(default_factory=dict)
+    internal_feature_mapping: dict[str, str] = Field(default_factory=dict)
+    indicator_control: dict[str, Any] = Field(
+        default_factory=lambda: {
+            "enabled": True,
+            "disabled_indicators": [],
+            "categories": {
+                "trend": True,
+                "momentum": True,
+                "volatility": True,
+                "volume": True,
+                "enhanced": True,
+            },
+        }
+    )
 
 
 class TradingInstrumentConfig(StrictBaseModel):
@@ -115,6 +171,7 @@ class TradingConfig(StrictBaseModel):
     labeling: LabelingConfig
     aggregation_timeframes: list[int] = Field(default_factory=lambda: [5, 15, 60])
     feature_timeframes: list[int] = Field(default_factory=lambda: [5, 15, 60])
+    labeling_timeframes: list[int] = Field(default_factory=lambda: [15])  # Default to 15min only
     features: TradingFeaturesConfig
     instruments: list[TradingInstrumentConfig]
 
@@ -271,6 +328,7 @@ class FeatureSelectionConfig(StrictBaseModel):
     importance_weight: float = Field(default=0.4, ge=0.0, le=1.0)
     min_selection_frequency: float = Field(default=0.2, ge=0.0, le=1.0)
     correlation_data_lookback_multiplier: int = Field(default=7, gt=0)
+    min_history_for_selection: int = Field(default=3, gt=0)
 
 
 class CrossAssetConfig(StrictBaseModel):
@@ -297,7 +355,7 @@ class ModelTrainingConfig(StrictBaseModel):
     min_data_for_training: int = Field(gt=0)
     historical_data_lookback_days: int = Field(gt=0)
     walk_forward_validation: WalkForwardValidationConfig
-    lgbm_params: dict
+    lgbm_params: dict[str, Any]
     optimization: OptimizationConfig = Field(default_factory=lambda: OptimizationConfig())
     final_model: FinalModelConfig = Field(default_factory=FinalModelConfig)
     retention: RetentionConfig = Field(default_factory=RetentionConfig)
@@ -364,6 +422,8 @@ class DataQualityTimeSeriesConfig(StrictBaseModel):
 
 class DataQualityOutlierDetectionConfig(StrictBaseModel):
     iqr_multiplier: float = Field(gt=0)
+    handling_strategy: str = Field(default="clip", pattern="^(clip|remove|flag)$")
+    min_iqr_data_points: int = Field(gt=0, default=4)
 
 
 class DataQualityPenaltiesConfig(StrictBaseModel):
@@ -373,12 +433,80 @@ class DataQualityPenaltiesConfig(StrictBaseModel):
     duplicate_penalty: float = Field(ge=0, le=1)
 
 
+class InstrumentSegmentsConfig(StrictBaseModel):
+    index_segments: list[str] = Field(default_factory=lambda: ["INDEX", "INDICES"])
+    equity_segments: list[str] = Field(default_factory=lambda: ["EQ", "EQUITY"])
+    fno_segments: list[str] = Field(default_factory=lambda: ["FUT", "OPT", "NFO-FUT", "NFO-OPT", "BFO-FUT", "BFO-OPT"])
+
+
 class DataQualityValidationConfig(StrictBaseModel):
     enabled: bool
     min_valid_rows: int = Field(ge=0)
     quality_score_threshold: float = Field(ge=0, le=100)
     expected_columns: dict[str, str] = Field(default_factory=dict)
     required_columns: list[str] = Field(default_factory=list)
+    instrument_segments: InstrumentSegmentsConfig = Field(default_factory=InstrumentSegmentsConfig)
+    indicator_validation: Optional[dict[str, Any]] = None
+
+
+class DataQualityFeatureValidationCustomRuleConfig(StrictBaseModel):
+    pattern: str
+    min_value: Optional[float] = None
+    max_value: Optional[float] = None
+    priority: int = Field(default=5, ge=1, le=10)
+    description: str = ""
+
+
+class DataQualityFeatureValidationCustomRulesConfig(StrictBaseModel):
+    range_rules: list[DataQualityFeatureValidationCustomRuleConfig] = Field(default_factory=list)
+
+
+class DataQualityFeatureValidationOscillatorConsistencyConfig(StrictBaseModel):
+    stochastic_volatility_ratio: float = Field(default=1.5, gt=0)
+    rsi_correlation_threshold: float = Field(default=0.8, ge=0, le=1)
+
+
+class DataQualityFeatureValidationBollingerConfig(StrictBaseModel):
+    enabled: bool = True
+    tolerance: float = Field(default=0.001, ge=0)
+
+
+class DataQualityFeatureValidationMacdConfig(StrictBaseModel):
+    enabled: bool = True
+    histogram_tolerance: float = Field(default=0.001, ge=0)
+
+
+class DataQualityFeatureValidationCrossValidationConfig(StrictBaseModel):
+    enabled: bool = True
+    oscillator_consistency: DataQualityFeatureValidationOscillatorConsistencyConfig = Field(
+        default_factory=DataQualityFeatureValidationOscillatorConsistencyConfig
+    )
+    bollinger_validation: DataQualityFeatureValidationBollingerConfig = Field(
+        default_factory=DataQualityFeatureValidationBollingerConfig
+    )
+    macd_validation: DataQualityFeatureValidationMacdConfig = Field(
+        default_factory=DataQualityFeatureValidationMacdConfig
+    )
+
+
+class RulePrioritiesConfig(StrictBaseModel):
+    model_training_range_parser: int = Field(default=10, gt=0)
+    indicator_config_parser: int = Field(default=8, gt=0)
+    custom_rule_parser: int = Field(default=7, gt=0)
+
+
+class DataQualityFeatureValidationConfig(StrictBaseModel):
+    enabled: bool = True
+    auto_discovery: bool = True
+    custom_rules: DataQualityFeatureValidationCustomRulesConfig = Field(
+        default_factory=DataQualityFeatureValidationCustomRulesConfig
+    )
+    cross_validation: DataQualityFeatureValidationCrossValidationConfig = Field(
+        default_factory=DataQualityFeatureValidationCrossValidationConfig
+    )
+    rule_priorities: RulePrioritiesConfig = Field(default_factory=RulePrioritiesConfig)
+    consistency_rules: Optional[list[dict[str, Any]]] = None
+    consistency_rule_defaults: Optional[dict[str, dict[str, Any]]] = None
 
 
 class DataQualityConfig(StrictBaseModel):
@@ -386,6 +514,7 @@ class DataQualityConfig(StrictBaseModel):
     outlier_detection: DataQualityOutlierDetectionConfig
     penalties: DataQualityPenaltiesConfig
     validation: DataQualityValidationConfig
+    feature_validation: DataQualityFeatureValidationConfig = Field(default_factory=DataQualityFeatureValidationConfig)
     live_data_lpt_threshold: int = Field(gt=0)
 
 
@@ -489,6 +618,45 @@ class MetricsConfig(StrictBaseModel):
     dashboard: DashboardConfig
 
 
+class APIConfig(StrictBaseModel):
+    """Configuration for API settings."""
+    admin_token: str
+    host: str = "127.0.0.1"
+
+
+class ProcessingControlConfig(StrictBaseModel):
+    """Configuration for processing control and state management."""
+
+    enabled: bool = True
+    force_reprocess: bool = False
+    reset_state_on_startup: bool = False
+    processing_mode: Literal["smart", "force", "skip"] = "smart"
+
+    # Component-specific controls
+    historical_processing_enabled: bool = True
+    historical_max_gap_hours: int = Field(default=24, gt=0)
+    historical_parallel_instruments: int = Field(default=3, gt=0)
+
+    aggregation_processing_enabled: bool = True
+    aggregation_reprocess_on_source_change: bool = True
+
+    feature_processing_enabled: bool = True
+    feature_incremental_calculation: bool = True
+    feature_recompute_on_config_change: bool = True
+
+    labeling_processing_enabled: bool = True
+    labeling_batch_size: int = Field(default=1000, gt=0)
+    
+    # Data sufficiency thresholds for smart processing
+    min_candles_for_historical: int = Field(default=100, gt=0)
+    min_candles_for_aggregation: int = Field(default=100, gt=0)
+    min_candles_for_features: int = Field(default=50, gt=0)
+    min_candles_for_labeling: int = Field(default=200, gt=0)
+    min_features_for_labeling: int = Field(default=100, gt=0)
+    min_existing_features_threshold: int = Field(default=10, gt=0)
+    min_existing_labels_threshold: int = Field(default=50, gt=0)
+
+
 class AppConfig(StrictBaseModel):
     # Core required configurations
     system: SystemConfig
@@ -516,15 +684,21 @@ class AppConfig(StrictBaseModel):
     signal_generation: Optional[SignalGenerationConfig] = None
     metrics: Optional[MetricsConfig] = None
     auth_server: Optional[AuthServerConfig] = None
+    processing_control: Optional[ProcessingControlConfig] = None
+    api: Optional[APIConfig] = None
 
 
 class QueriesConfig(StrictBaseModel):
+    chart_repo: dict[str, str]
     feature_repo: dict[str, str]
     instrument_repo: dict[str, str]
     label_repo: dict[str, str]
     migrate: dict[str, str]
+    model_registry: dict[str, str]
     ohlcv_repo: dict[str, str]
     signal_repo: dict[str, str]
+    label_stats_repo: dict[str, str]
+    processing_state_repo: dict[str, str]
 
 
 class ConfigLoader:
@@ -539,6 +713,9 @@ class ConfigLoader:
         self.queries_path = queries_path
         self._config: Optional[AppConfig] = None
         self._queries: Optional[QueriesConfig] = None
+        self._config_lock = None
+        self._backup_suffix = ".backup"
+        self._temp_suffix = ".tmp"
 
     def get_config(self) -> AppConfig:
         if self._config is None:
@@ -547,6 +724,7 @@ class ConfigLoader:
                 with open(self.config_path, encoding="utf-8") as f:
                     config_data = yaml.safe_load(f)
                 if config_data is None:
+                    logger.error(f"ConfigurationError: Config file '{self.config_path}' is empty or invalid.")
                     raise ValueError("Config file is empty or invalid")
 
                 # Load metrics config if it exists and path is provided
@@ -557,8 +735,15 @@ class ConfigLoader:
                         if metrics_data and "metrics" in metrics_data:
                             config_data["metrics"] = metrics_data["metrics"]
                     except FileNotFoundError:
+                        logger.warning(f"Metrics config file '{self.metrics_path}' not found. Proceeding without it.")
                         # Metrics config is optional
-                        pass
+                    except yaml.YAMLError as e:
+                        logger.error(f"Error parsing metrics config file '{self.metrics_path}': {e}")
+                        raise ValueError(f"Error parsing metrics config file '{self.metrics_path}': {e}") from e
+
+                # Load database configuration from environment variables using Pydantic BaseSettings
+                db_config = DatabaseConfig()  # type: ignore[call-arg]  # nosec
+                config_data["database"] = db_config.model_dump()
 
                 # Load environment-based configurations
                 # Broker configuration: credentials from environment, other settings from YAML
@@ -571,8 +756,12 @@ class ConfigLoader:
                     api_secret = os.getenv("KITE_API_SECRET")
 
                     if not api_key:
+                        logger.error("ConfigurationError: KITE_API_KEY environment variable is required but not set.")
                         raise ValueError("KITE_API_KEY environment variable is required but not set")
                     if not api_secret:
+                        logger.error(
+                            "ConfigurationError: KITE_API_SECRET environment variable is required but not set."
+                        )
                         raise ValueError("KITE_API_SECRET environment variable is required but not set")
 
                     yaml_broker["api_key"] = api_key
@@ -580,12 +769,14 @@ class ConfigLoader:
                     config_data["broker"] = yaml_broker
                 else:
                     # No broker section in YAML - this should not happen in our case
+                    logger.error(
+                        "ConfigurationError: Broker configuration section is required in config.yaml but not found."
+                    )
                     raise ValueError("Broker configuration section is required in config.yaml")
 
                 self._config = AppConfig(**config_data)
-
-                self._config = AppConfig(**config_data)
             except FileNotFoundError:
+                logger.error(f"ConfigurationError: Config file '{self.config_path}' not found.")
                 raise FileNotFoundError(f"Configuration file '{self.config_path}' not found.") from None
             except ValidationError as e:
                 # Provide a more user-friendly error message
@@ -595,10 +786,231 @@ class ConfigLoader:
                     msg = error["msg"]
                     error_messages.append(f"  - In section '{loc}': {msg}")
                 error_str = "\n".join(error_messages)
+                logger.error(
+                    f"ConfigurationValidationError: Configuration validation failed for '{self.config_path}':\n{error_str}"
+                )
                 raise ValueError(f"Configuration validation failed:\n{error_str}") from e
             except Exception as e:
+                logger.error(
+                    f"ConfigurationError: Unexpected error loading config file '{self.config_path}': {e}", exc_info=True
+                )
                 raise Exception(f"Error loading config file '{self.config_path}': {e}") from e
         return self._config
+
+    def save_config(self, config: AppConfig) -> None:
+        """Save configuration to YAML file with atomic write and backup"""
+        import shutil
+        from pathlib import Path
+
+        config_path = Path(self.config_path)
+        backup_path = config_path.with_suffix(config_path.suffix + self._backup_suffix)
+        temp_path = config_path.with_suffix(config_path.suffix + self._temp_suffix)
+
+        try:
+            # Create backup of current config
+            if config_path.exists():
+                shutil.copy2(config_path, backup_path)
+
+            # Prepare config data for YAML serialization
+            config_dict = self._prepare_config_for_yaml(config)
+
+            # Write to temporary file first (atomic operation)
+            with open(temp_path, "w", encoding="utf-8") as f:
+                yaml.dump(config_dict, f, default_flow_style=False, indent=2, sort_keys=False)
+
+            # Atomic move to final location
+            shutil.move(temp_path, config_path)
+
+            # Update cached config
+            self._config = config
+
+        except Exception as e:
+            # Cleanup temp file if it exists
+            if temp_path.exists():
+                temp_path.unlink()
+
+            # Restore backup if save failed
+            if backup_path.exists() and not config_path.exists():
+                shutil.move(backup_path, config_path)
+
+            raise Exception(f"Failed to save configuration: {e}") from e
+        finally:
+            # Clean up temp file
+            if temp_path.exists():
+                temp_path.unlink()
+
+    def _prepare_config_for_yaml(self, config: AppConfig) -> dict[str, Any]:
+        """Prepare config object for YAML serialization"""
+
+        # Convert to dict and handle special cases
+        config_dict = config.model_dump()
+
+        # Remove sensitive data that should come from environment
+        if "broker" in config_dict:
+            broker_dict = config_dict["broker"].copy()
+            # Remove credentials - they should always come from environment
+            broker_dict.pop("api_key", None)
+            broker_dict.pop("api_secret", None)
+            config_dict["broker"] = broker_dict
+
+        # Remove database config - it comes from environment
+        config_dict.pop("database", None)
+
+        # Handle date/time objects
+        serialized = self._serialize_datetime_objects(config_dict)
+        # We know this will be a dict since we started with config_dict (dict)
+        return serialized if isinstance(serialized, dict) else {}
+
+    def _serialize_datetime_objects(self, obj: Any) -> Union[dict[str, Any], list[Any], str, Any]:
+        """Recursively serialize datetime objects to ISO format"""
+        if isinstance(obj, dict):
+            return {k: self._serialize_datetime_objects(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [self._serialize_datetime_objects(item) for item in obj]
+        if hasattr(obj, "isoformat"):
+            return obj.isoformat()
+        return obj
+
+    def validate_config_section(self, section: str, data: dict[str, Any]) -> bool:
+        """Validate configuration section data"""
+        try:
+            config = self.get_config()
+
+            # Get the section model class
+            section_field = config.model_fields.get(section)
+            if not section_field:
+                raise ValueError(f"Unknown configuration section: {section}")
+
+            # Get the annotation (type) for this section
+            section_type = section_field.annotation
+
+            # Handle Optional types
+            if section_type and hasattr(section_type, "__origin__") and section_type.__origin__ is Union:
+                # Extract the non-None type from Optional[T]
+                args = getattr(section_type, "__args__", None)
+                if args:
+                    section_type = next((arg for arg in args if arg is not type(None)), None)
+
+            # Validate the data against the section model
+            if section_type is not None:
+                section_type(**data)
+            return True
+
+        except Exception as e:
+            raise ValueError(f"Configuration validation failed for section '{section}': {e}") from e
+
+    def update_config_section(self, section: str, data: dict[str, Any]) -> None:
+        """Update a specific configuration section"""
+        try:
+            # Validate the section data first
+            self.validate_config_section(section, data)
+
+            # Load current config
+            config = self.get_config()
+
+            # Update the section
+            current_section = getattr(config, section)
+
+            # If current section is None (optional section), create new instance
+            if current_section is None:
+                section_field = config.model_fields.get(section)
+                if section_field is not None:
+                    section_type = section_field.annotation
+
+                    # Handle Optional types
+                    if section_type and hasattr(section_type, "__origin__") and section_type.__origin__ is Union:
+                        args = getattr(section_type, "__args__", None)
+                        if args:
+                            section_type = next((arg for arg in args if arg is not type(None)), None)
+
+                    if section_type is not None:
+                        updated_section = section_type(**data)
+                    else:
+                        raise ValueError(f"Could not determine type for section '{section}'")
+                else:
+                    raise ValueError(f"Section '{section}' not found in config model")
+            else:
+                # Update existing section
+                updated_section = current_section.model_copy(update=data)
+
+            # Create new config with updated section
+            updated_config = config.model_copy(update={section: updated_section})
+
+            # Save the updated configuration
+            self.save_config(updated_config)
+
+        except Exception as e:
+            raise Exception(f"Failed to update configuration section '{section}': {e}") from e
+
+    def get_config_section(self, section: str) -> dict[str, Any]:
+        """Get a specific configuration section as dict"""
+        config = self.get_config()
+
+        if not hasattr(config, section):
+            raise ValueError(f"Unknown configuration section: {section}")
+
+        section_obj = getattr(config, section)
+
+        if section_obj is None:
+            return {}
+
+        if hasattr(section_obj, "model_dump"):
+            result = section_obj.model_dump()
+            return result if isinstance(result, dict) else {}
+        if isinstance(section_obj, dict):
+            return section_obj
+        # Convert other types to dict representation
+        return {"value": section_obj}
+
+    def reload_config(self) -> AppConfig:
+        """Reload configuration from file"""
+        self._config = None
+        return self.get_config()
+
+    def backup_config(self) -> str:
+        """Create a timestamped backup of current config"""
+        import shutil
+        from datetime import datetime
+        from pathlib import Path
+
+        config_path = Path(self.config_path)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_path = config_path.with_suffix(f".{timestamp}.backup")
+
+        if config_path.exists():
+            shutil.copy2(config_path, backup_path)
+            return str(backup_path)
+
+        raise FileNotFoundError(f"Config file {config_path} not found")
+
+    def restore_config(self, backup_path: str) -> None:
+        """Restore configuration from backup"""
+        import shutil
+        from pathlib import Path
+
+        backup_file = Path(backup_path)
+        config_path = Path(self.config_path)
+
+        if not backup_file.exists():
+            raise FileNotFoundError(f"Backup file {backup_path} not found")
+
+        # Validate backup file before restoring
+        try:
+            with open(backup_file, encoding="utf-8") as f:
+                config_data = yaml.safe_load(f)
+
+            # Basic validation
+            if not config_data or "system" not in config_data:
+                raise ValueError("Invalid backup file format")
+
+            # Copy backup to current config
+            shutil.copy2(backup_file, config_path)
+
+            # Reload configuration
+            self.reload_config()
+
+        except Exception as e:
+            raise Exception(f"Failed to restore configuration from backup: {e}") from e
 
     def get_queries(self) -> QueriesConfig:
         if self._queries is None:

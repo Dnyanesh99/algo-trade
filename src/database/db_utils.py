@@ -67,58 +67,92 @@ class DatabaseManager:
     _instance: Optional["DatabaseManager"] = None
     _pool: Optional[asyncpg.Pool] = None
     _lock = asyncio.Lock()
+    _initialized: bool = False
 
     def __new__(cls) -> "DatabaseManager":
         if cls._instance is None:
             cls._instance = super().__new__(cls)
-            cls._instance._pool = None  # Ensure pool is None initially
-            cls._instance._initialized = False  # Initialize flag
+            cls._instance._pool = None
+            cls._instance._initialized = False
         return cls._instance
 
     async def initialize(self) -> None:
         """
         Initializes the database connection pool.
-        This method should be called once at application startup.
+        This method is critical and must be called once at application startup.
         """
         async with self._lock:
-            if self._pool is None:
-                logger.info("Initializing database connection pool...")
-                # Load database configuration from environment variables
-                try:
-                    db_config = DatabaseConfig()  # type: ignore[call-arg]
-                except Exception as e:
-                    logger.critical(f"Failed to load database configuration: {e}")
-                    raise ValueError(f"Database configuration is invalid: {e}") from e
+            if self._pool is not None and self._initialized:
+                logger.warning("DatabaseManager.initialize called, but pool is already initialized.")
+                return
 
-                try:
-                    self._pool = await asyncpg.create_pool(
-                        user=db_config.user,
-                        password=db_config.password,  # password is a string in DatabaseConfig
-                        host=db_config.host,
-                        port=db_config.port,
-                        database=db_config.dbname,
-                        min_size=db_config.min_connections,
-                        max_size=db_config.max_connections,
-                        timeout=db_config.timeout,
+            logger.info("Initializing database connection pool...")
+            try:
+                db_config = DatabaseConfig()  # type: ignore[call-arg]
+            except Exception as e:
+                logger.critical(
+                    f"CRITICAL: Failed to load database configuration. Check environment variables. Error: {e}",
+                    exc_info=True,
+                )
+                raise ValueError("Database configuration is invalid or missing essential values.") from e
+
+            logger.info(
+                f"Attempting to create connection pool for database '{db_config.dbname}' at {db_config.host}:{db_config.port}"
+            )
+            try:
+                self._pool = await asyncpg.create_pool(
+                    user=db_config.user,
+                    password=db_config.password,
+                    host=db_config.host,
+                    port=db_config.port,
+                    database=db_config.dbname,
+                    min_size=db_config.min_connections,
+                    max_size=db_config.max_connections,
+                    timeout=db_config.timeout,
+                )
+                # Verify connection by acquiring and releasing a connection
+                async with self._pool.acquire() as conn:
+                    server_version = conn.get_server_version()
+                    logger.info(
+                        f"Database connection pool initialized successfully. Connected to PostgreSQL server version {server_version.major}.{server_version.minor}"
                     )
-                    self._initialized = True
-                    logger.info("Database connection pool initialized successfully.")
-                except Exception as e:
-                    logger.critical(f"Failed to initialize database connection pool: {e}")
-                    # Re-raise to ensure application startup fails if DB connection cannot be established
-                    raise RuntimeError(f"Database initialization failed: {e}") from e
+
+                self._initialized = True
+
+            except (
+                asyncpg.exceptions.InvalidPasswordError,
+                asyncpg.exceptions.InvalidAuthorizationSpecificationError,
+            ) as e:
+                logger.critical(
+                    f"CRITICAL: Database authentication failed for user '{db_config.user}'. Check credentials. Error: {e}"
+                )
+                raise RuntimeError("Database authentication failed.") from e
+            except ConnectionRefusedError as e:
+                logger.critical(
+                    f"CRITICAL: Database connection refused at {db_config.host}:{db_config.port}. Is the database running and accessible? Error: {e}"
+                )
+                raise RuntimeError("Database connection was refused.") from e
+            except Exception as e:
+                logger.critical(f"CRITICAL: Failed to create database connection pool. Error: {e}", exc_info=True)
+                raise RuntimeError("Database initialization failed due to an unexpected error.") from e
 
     async def close(self) -> None:
         """
-        Closes the database connection pool.
+        Closes the database connection pool gracefully.
         """
         async with self._lock:
             if self._pool and self._initialized:
                 logger.info("Closing database connection pool...")
-                await self._pool.close()
-                self._pool = None
-                self._initialized = False
-                logger.info("Database connection pool closed.")
+                try:
+                    await self._pool.close()
+                    logger.info("Database connection pool closed successfully.")
+                except Exception as e:
+                    logger.error(f"An error occurred while closing the database pool: {e}", exc_info=True)
+                finally:
+                    self._pool = None
+                    self._initialized = False
+            else:
+                logger.info("Database connection pool was not initialized or already closed.")
 
     @asynccontextmanager
     async def get_connection(self) -> AsyncGenerator[asyncpg.Connection, None]:
@@ -126,16 +160,16 @@ class DatabaseManager:
         Provides an asynchronous context manager for acquiring a database connection
         from the pool. The connection is released back to the pool automatically.
         """
-        if self._pool is None:
-            logger.error("DatabaseManager not initialized. Call .initialize() first.")
-            raise RuntimeError("DatabaseManager not initialized.")
+        if not self._pool or not self._initialized:
+            logger.critical("CRITICAL: Attempted to get a DB connection from an uninitialized pool.")
+            raise RuntimeError("DatabaseManager is not initialized. Call initialize() at application startup.")
 
         conn: Optional[asyncpg.Connection] = None
         try:
             conn = await self._pool.acquire()
             yield conn
         except Exception as e:
-            logger.error(f"Error acquiring database connection: {e}")
+            logger.error(f"Failed to acquire a database connection from the pool: {e}", exc_info=True)
             raise
         finally:
             if conn:
@@ -148,6 +182,7 @@ class DatabaseManager:
         Commits on success, rolls back on error.
         """
         async with self.get_connection() as conn:
+            logger.debug("Starting a new database transaction.")
             tr = conn.transaction()
             await tr.start()
             try:
@@ -155,8 +190,10 @@ class DatabaseManager:
                 await tr.commit()
                 logger.debug("Transaction committed successfully.")
             except Exception as e:
-                await tr.rollback()
-                logger.error(f"Transaction rolled back due to error: {e}")
+                logger.error(f"Transaction rolled back due to an error: {e}", exc_info=True)
+                if not tr.is_completed():
+                    await tr.rollback()
+                    logger.info("Transaction has been rolled back.")
                 raise
 
     @measure_db_operation(operation="fetch")
@@ -175,6 +212,14 @@ class DatabaseManager:
         """
         async with self.get_connection() as conn:
             return await conn.fetchrow(query, *args)
+
+    @measure_db_operation(operation="fetch")
+    async def fetchval(self, query: str, *args: Any) -> Any:
+        """
+        Executes a query and fetches a single value.
+        """
+        async with self.get_connection() as conn:
+            return await conn.fetchval(query, *args)
 
     @measure_db_operation(operation="execute")
     async def execute(self, query: str, *args: Any) -> str:

@@ -14,7 +14,6 @@ import pandas as pd
 import pytz
 from pydantic import BaseModel
 
-from src.core.feature_validator import FeatureValidator
 from src.database.feature_repo import FeatureRepository
 from src.database.ohlcv_repo import OHLCVRepository
 from src.metrics.registry import metrics_registry
@@ -22,6 +21,7 @@ from src.state.error_handler import ErrorHandler
 from src.state.health_monitor import HealthMonitor
 from src.utils.config_loader import ConfigLoader, FeatureEngineeringConfig
 from src.utils.logger import LOGGER as logger
+from src.validation.feature_validator import FeatureValidator
 
 config = ConfigLoader().get_config()
 
@@ -60,567 +60,366 @@ class FeatureEngineeringPipeline:
         error_handler: ErrorHandler,
         health_monitor: HealthMonitor,
     ):
+        if not all(isinstance(repo, (OHLCVRepository, FeatureRepository)) for repo in [ohlcv_repo, feature_repo]):
+            raise TypeError("ohlcv_repo and feature_repo must be valid repository instances.")
+        if not isinstance(feature_validator, FeatureValidator):
+            raise TypeError("feature_validator must be a valid FeatureValidator instance.")
+        if not isinstance(error_handler, ErrorHandler) or not isinstance(health_monitor, HealthMonitor):
+            raise TypeError("error_handler and health_monitor must be valid instances.")
+
         self.ohlcv_repo = ohlcv_repo
         self.feature_repo = feature_repo
         self.feature_validator = feature_validator
         self.error_handler = error_handler
         self.health_monitor = health_monitor
 
-        # Load configuration
-        if config.model_training is None:
-            raise ValueError("Model training configuration is required")
+        if not config.model_training or not config.model_training.feature_engineering:
+            raise ValueError("model_training.feature_engineering configuration is required.")
         self.config: FeatureEngineeringConfig = config.model_training.feature_engineering
 
-        # Get existing feature configurations from config.yaml
-        if config.trading is None:
-            raise ValueError("Trading configuration is required")
+        if not config.trading or not config.trading.features:
+            raise ValueError("trading.features configuration is required.")
         self.base_feature_configs = config.trading.features.configurations
         self.feature_timeframes = config.trading.feature_timeframes
 
-        # Feature importance history for selection
         self.importance_history: dict[str, list[dict[str, Any]]] = defaultdict(list)
-
-        # Cross-asset correlation cache
         self.correlation_cache: dict[str, tuple[float, datetime]] = {}
-
-        # Selected features cache
         self.selected_features_cache: dict[str, set[str]] = {}
 
-        logger.info("FeatureEngineeringPipeline initialized with production configuration")
+        logger.info("FeatureEngineeringPipeline initialized with production configuration.")
 
     async def generate_engineered_features(
-        self, instrument_id: int, timeframe: str, timestamp: datetime, base_features: dict[str, float]
+        self,
+        instrument_id: int,
+        timeframe: str,
+        timestamp: datetime,
+        base_features: dict[str, float],
+        ohlcv_df: pd.DataFrame,
+        segment: str,
     ) -> dict[str, EngineeredFeature]:
         """
-        Generate engineered features using existing base features from FeatureCalculator
+        Generate engineered features using existing base features from FeatureCalculator.
         """
         if not self.config.feature_generation.enabled:
+            logger.debug("Feature engineering is disabled in the configuration.")
             return {}
 
         start_time = time.time()
-        engineered_features = {}
+        engineered_features: dict[str, EngineeredFeature] = {}
+        logger.debug(f"Starting engineered feature generation for instrument {instrument_id} ({timeframe}).")
 
         try:
-            # Get recent OHLCV data for pattern generation
-            recent_data = await self._get_recent_ohlcv_data(instrument_id, timeframe, timestamp)
-            if recent_data.empty:
+            if ohlcv_df.empty:
+                logger.warning(
+                    f"OHLCV DataFrame is empty for instrument {instrument_id}. Cannot generate engineered features."
+                )
                 return {}
 
-            # Generate features for each configured pattern
             for pattern in self.config.feature_generation.patterns:
                 pattern_start = time.time()
-
                 try:
-                    pattern_features = await self._generate_pattern_features(
-                        pattern, base_features, recent_data, timestamp
-                    )
+                    pattern_features = await self._generate_pattern_features(pattern, base_features, ohlcv_df, segment)
                     engineered_features.update(pattern_features)
-
-                    # Record metrics for successful generation
-                    pattern_duration = time.time() - pattern_start
+                    pattern_duration = (time.time() - pattern_start) * 1000
                     metrics_registry.record_feature_generation(
                         str(instrument_id), timeframe, pattern, pattern_duration, True
                     )
-
+                    logger.debug(
+                        f"Successfully generated {len(pattern_features)} features for pattern '{pattern}' in {pattern_duration:.2f}ms."
+                    )
                 except Exception as e:
-                    # Record failed generation
-                    pattern_duration = time.time() - pattern_start
+                    pattern_duration = (time.time() - pattern_start) * 1000
                     metrics_registry.record_feature_generation(
                         str(instrument_id), timeframe, pattern, pattern_duration, False
                     )
-
                     await self.error_handler.handle_error(
-                        "feature_engineering",
-                        f"Pattern generation failed for {pattern}: {e}",
+                        "feature_engineering_pattern",
+                        f"Pattern generation failed for '{pattern}': {e}",
                         {"instrument_id": instrument_id, "timeframe": timeframe, "pattern": pattern},
+                        exc_info=True,
                     )
 
-            # Store engineered features if any were generated
             if engineered_features:
                 await self._store_engineered_features(instrument_id, timeframe, timestamp, engineered_features)
 
-            total_duration = time.time() - start_time
-            logger.debug(
-                f"Generated {len(engineered_features)} features for {instrument_id} "
-                f"({timeframe}) in {total_duration:.3f}s"
+            total_duration = (time.time() - start_time) * 1000
+            logger.info(
+                f"Generated and stored {len(engineered_features)} engineered features for instrument {instrument_id} "
+                f"({timeframe}) in {total_duration:.2f}ms."
             )
-
             return engineered_features
 
         except Exception as e:
             await self.error_handler.handle_error(
-                "feature_engineering",
-                f"Feature generation failed: {e}",
+                "feature_engineering_pipeline",
+                f"Feature generation pipeline failed: {e}",
                 {"instrument_id": instrument_id, "timeframe": timeframe},
+                exc_info=True,
             )
             return {}
 
     async def _generate_pattern_features(
-        self, pattern: str, base_features: dict[str, float], recent_data: pd.DataFrame, timestamp: datetime
+        self,
+        pattern: str,
+        base_features: dict[str, float],
+        ohlcv_df: pd.DataFrame,
+        segment: str,
     ) -> dict[str, EngineeredFeature]:
-        """Generate features for a specific pattern using actual base features"""
-        features = {}
-
-        if pattern == "momentum_ratios":
-            features.update(self._generate_momentum_ratios(base_features, recent_data))
-        elif pattern == "volatility_adjustments":
-            features.update(self._generate_volatility_adjustments(base_features, recent_data))
-        elif pattern == "trend_confirmations":
-            features.update(self._generate_trend_confirmations(base_features, recent_data))
-        elif pattern == "mean_reversion_signals":
-            features.update(self._generate_mean_reversion_signals(base_features, recent_data))
-        elif pattern == "breakout_indicators":
-            features.update(self._generate_breakout_indicators(base_features, recent_data))
-
-        return features
+        """
+        DEPRECATED: Pattern generation has been migrated to modular indicators system.
+        This method is kept for backward compatibility only.
+        """
+        logger.warning(
+            f"⚠️ DEPRECATED: Pattern generation for '{pattern}' should now use modular indicators system. "
+            f"This legacy method will be removed in a future version."
+        )
+        # Return empty features - modular system handles this now
+        return {}
 
     def _generate_momentum_ratios(
-        self, base_features: dict[str, float], recent_data: pd.DataFrame
+        self, base_features: dict[str, float], ohlcv_df: pd.DataFrame
     ) -> dict[str, EngineeredFeature]:
-        """Generate momentum-based ratio features using existing indicators"""
-        features = {}
-
-        try:
-            # Use actual price data for momentum calculations
-            if len(recent_data) >= 20:
-                close_prices = recent_data["close"].values
-
-                # Price momentum ratios
-                for period in self.config.feature_generation.lookback_periods:
-                    if len(close_prices) > period:
-                        momentum_ratio = close_prices[-1] / close_prices[-period - 1] - 1.0
-                        features[f"momentum_ratio_{period}d"] = EngineeredFeature(
-                            name=f"momentum_ratio_{period}d",
-                            value=momentum_ratio,
-                            generation_method="price_ratio",
-                            source_features=["close"],
-                            quality_score=min(1.0, abs(momentum_ratio) * 10)
-                            if np.isfinite(momentum_ratio)
-                            else 0.0,  # Penalize non-finite values
-                        )
-
-                # RSI momentum confirmation (using existing RSI values)
-                rsi_14 = base_features.get("rsi_14")
-                if rsi_14 is not None:
-                    rsi_momentum = (rsi_14 - 50) / 50  # Normalize RSI around 50
-                    features["rsi_momentum_normalized"] = EngineeredFeature(
-                        name="rsi_momentum_normalized",
-                        value=rsi_momentum,
-                        generation_method="rsi_normalization",
-                        source_features=["rsi_14"],
-                        quality_score=abs(rsi_momentum),
-                    )
-
-                # MACD momentum strength (using existing MACD values)
-                macd = base_features.get("macd")
-                macd_signal = base_features.get("macd_signal")
-                if macd is not None and macd_signal is not None:
-                    macd_strength = abs(macd - macd_signal)
-                    features["macd_momentum_strength"] = EngineeredFeature(
-                        name="macd_momentum_strength",
-                        value=macd_strength,
-                        generation_method="macd_divergence",
-                        source_features=["macd", "macd_signal"],
-                        quality_score=min(1.0, macd_strength),
-                    )
-
-        except Exception as e:
-            logger.warning(f"Momentum ratio generation failed: {e}")
-
-        return features
+        """
+        DEPRECATED: Migrated to MomentumRatiosIndicator in modular system.
+        Use src/core/indicators/enhanced/momentum_ratios.py instead.
+        """
+        logger.warning("⚠️ DEPRECATED: _generate_momentum_ratios migrated to modular indicators")
+        return {}
 
     def _generate_volatility_adjustments(
-        self, base_features: dict[str, float], recent_data: pd.DataFrame
+        self, base_features: dict[str, float], ohlcv_df: pd.DataFrame
     ) -> dict[str, EngineeredFeature]:
-        """Generate volatility-adjusted features using existing ATR"""
-        features = {}
-
-        try:
-            atr_14 = base_features.get("atr_14")
-            if atr_14 is not None and atr_14 > 0 and len(recent_data) >= 2:
-                # Volatility-adjusted returns
-                recent_return = recent_data["close"].iloc[-1] / recent_data["close"].iloc[-2] - 1.0
-                vol_adjusted_return = recent_return / atr_14
-
-                features["volatility_adjusted_return"] = EngineeredFeature(
-                    name="volatility_adjusted_return",
-                    value=vol_adjusted_return,
-                    generation_method="return_atr_normalization",
-                    source_features=["close", "atr_14"],
-                    quality_score=min(1.0, abs(vol_adjusted_return)),
-                )
-
-                # Bollinger Band position with volatility adjustment
-                bb_upper = base_features.get("bb_upper")
-                bb_lower = base_features.get("bb_lower")
-                close = recent_data["close"].iloc[-1]
-
-                if bb_upper is not None and bb_lower is not None and bb_upper != bb_lower:
-                    bb_position = (close - bb_lower) / (bb_upper - bb_lower)
-                    vol_adjusted_bb = bb_position * (atr_14 / close)  # Adjust by relative volatility
-
-                    features["vol_adjusted_bb_position"] = EngineeredFeature(
-                        name="vol_adjusted_bb_position",
-                        value=vol_adjusted_bb,
-                        generation_method="bb_volatility_adjustment",
-                        source_features=["bb_upper", "bb_lower", "close", "atr_14"],
-                        quality_score=abs(bb_position - 0.5) * 2,  # Quality higher at extremes
-                    )
-
-        except Exception as e:
-            logger.warning(f"Volatility adjustment generation failed: {e}")
-
-        return features
+        """
+        DEPRECATED: Migrated to VolatilityAdjustmentsIndicator in modular system.
+        Use src/core/indicators/enhanced/volatility_adjustments.py instead.
+        """
+        logger.warning("⚠️ DEPRECATED: _generate_volatility_adjustments migrated to modular indicators")
+        return {}
 
     def _generate_trend_confirmations(
-        self, base_features: dict[str, float], recent_data: pd.DataFrame
+        self, base_features: dict[str, float], ohlcv_df: pd.DataFrame
     ) -> dict[str, EngineeredFeature]:
-        """Generate trend confirmation features using existing trend indicators"""
-        features = {}
-
-        try:
-            # ADX trend strength confirmation
-            adx = base_features.get("adx")
-            if adx is not None:
-                trend_strength = min(adx / 25.0, 2.0)  # Normalize ADX (25+ is strong trend)
-                features["trend_strength_normalized"] = EngineeredFeature(
-                    name="trend_strength_normalized",
-                    value=trend_strength,
-                    generation_method="adx_normalization",
-                    source_features=["adx"],
-                    quality_score=min(1.0, trend_strength),
-                )
-
-            # Multi-indicator trend confirmation
-            trend_indicators = []
-
-            # MACD trend
-            macd = base_features.get("macd")
-            macd_signal = base_features.get("macd_signal")
-            if macd is not None and macd_signal is not None:
-                trend_indicators.append(1 if macd > macd_signal else -1)
-
-            # SAR trend
-            sar = base_features.get("sar")
-            if sar is not None and len(recent_data) > 0:
-                current_close = recent_data["close"].iloc[-1]
-                trend_indicators.append(1 if current_close > sar else -1)
-
-            # AROON trend
-            aroon_up = base_features.get("aroon_up")
-            aroon_down = base_features.get("aroon_down")
-            if aroon_up is not None and aroon_down is not None:
-                trend_indicators.append(1 if aroon_up > aroon_down else -1)
-
-            if trend_indicators:
-                trend_consensus = sum(trend_indicators) / len(trend_indicators)
-                features["trend_consensus"] = EngineeredFeature(
-                    name="trend_consensus",
-                    value=trend_consensus,
-                    generation_method="multi_indicator_consensus",
-                    source_features=["macd", "macd_signal", "sar", "aroon_up", "aroon_down"],
-                    quality_score=abs(trend_consensus),
-                )
-
-        except Exception as e:
-            logger.warning(f"Trend confirmation generation failed: {e}")
-
-        return features
+        """
+        DEPRECATED: Migrated to TrendConfirmationsIndicator in modular system.
+        Use src/core/indicators/enhanced/trend_confirmations.py instead.
+        """
+        logger.warning("⚠️ DEPRECATED: _generate_trend_confirmations migrated to modular indicators")
+        return {}
 
     def _generate_mean_reversion_signals(
-        self, base_features: dict[str, float], recent_data: pd.DataFrame
+        self, base_features: dict[str, float], ohlcv_df: pd.DataFrame
     ) -> dict[str, EngineeredFeature]:
-        """Generate mean reversion signals using existing oscillators"""
-        features = {}
-
-        try:
-            # RSI mean reversion signal
-            rsi_14 = base_features.get("rsi_14")
-            if rsi_14 is not None:
-                if rsi_14 > 70:
-                    reversion_signal = (rsi_14 - 70) / 30  # Overbought strength
-                elif rsi_14 < 30:
-                    reversion_signal = (30 - rsi_14) / 30  # Oversold strength
-                else:
-                    reversion_signal = 0.0
-
-                features["rsi_mean_reversion"] = EngineeredFeature(
-                    name="rsi_mean_reversion",
-                    value=reversion_signal,
-                    generation_method="rsi_extremes",
-                    source_features=["rsi_14"],
-                    quality_score=abs(reversion_signal),
-                )
-
-            # Williams %R mean reversion
-            willr = base_features.get("willr")
-            if willr is not None:
-                # Williams %R is typically negative, so reverse the logic
-                if willr > -20:  # Overbought
-                    willr_reversion = (willr + 20) / 20
-                elif willr < -80:  # Oversold
-                    willr_reversion = (willr + 80) / 20
-                else:
-                    willr_reversion = 0.0
-
-                features["willr_mean_reversion"] = EngineeredFeature(
-                    name="willr_mean_reversion",
-                    value=willr_reversion,
-                    generation_method="willr_extremes",
-                    source_features=["willr"],
-                    quality_score=abs(willr_reversion),
-                )
-
-            # Composite mean reversion score
-            reversion_signals = []
-            for feature_name in ["rsi_mean_reversion", "willr_mean_reversion"]:
-                if feature_name in features:
-                    reversion_signals.append(features[feature_name].value)
-
-            if reversion_signals:
-                composite_reversion = float(np.mean(reversion_signals))
-                features["composite_mean_reversion"] = EngineeredFeature(
-                    name="composite_mean_reversion",
-                    value=composite_reversion,
-                    generation_method="multi_oscillator_consensus",
-                    source_features=["rsi_14", "willr"],
-                    quality_score=float(abs(composite_reversion)),
-                )
-
-        except Exception as e:
-            logger.warning(f"Mean reversion signal generation failed: {e}")
-
-        return features
+        """
+        DEPRECATED: Migrated to MeanReversionSignalsIndicator in modular system.
+        Use src/core/indicators/enhanced/mean_reversion_signals.py instead.
+        """
+        logger.warning("⚠️ DEPRECATED: _generate_mean_reversion_signals migrated to modular indicators")
+        return {}
 
     def _generate_breakout_indicators(
-        self, base_features: dict[str, float], recent_data: pd.DataFrame
+        self, base_features: dict[str, float], ohlcv_df: pd.DataFrame, segment: str
     ) -> dict[str, EngineeredFeature]:
-        """Generate breakout indicators using existing features"""
-        features: dict[str, EngineeredFeature] = {}
-
-        try:
-            if len(recent_data) < 20:
-                return features
-
-            current_close = recent_data["close"].iloc[-1]
-
-            # Bollinger Band breakout
-            bb_upper = base_features.get("bb_upper")
-            bb_lower = base_features.get("bb_lower")
-            if bb_upper is not None and bb_lower is not None:
-                if current_close > bb_upper:
-                    breakout_strength = (current_close - bb_upper) / bb_upper
-                elif current_close < bb_lower:
-                    breakout_strength = (bb_lower - current_close) / bb_lower
-                else:
-                    breakout_strength = 0.0
-
-                features["bb_breakout_strength"] = EngineeredFeature(
-                    name="bb_breakout_strength",
-                    value=breakout_strength,
-                    generation_method="bollinger_breakout",
-                    source_features=["bb_upper", "bb_lower", "close"],
-                    quality_score=abs(breakout_strength) * 10,
-                )
-
-            # Volume-confirmed breakout
-            obv = base_features.get("obv")
-            if obv is not None and len(recent_data) >= 10:
-                # Simple volume trend (would be better with OBV history)
-                recent_volume = recent_data["volume"].iloc[-5:].mean()
-                longer_volume = recent_data["volume"].iloc[-20:-5].mean()
-
-                if longer_volume > 0:
-                    volume_ratio = recent_volume / longer_volume
-
-                    # Combine price breakout with volume confirmation
-                    bb_breakout = features.get("bb_breakout_strength")
-                    if bb_breakout is not None and abs(bb_breakout.value) > 0:
-                        volume_confirmed_breakout = bb_breakout.value * min(volume_ratio, 2.0)
-
-                        features["volume_confirmed_breakout"] = EngineeredFeature(
-                            name="volume_confirmed_breakout",
-                            value=volume_confirmed_breakout,
-                            generation_method="volume_price_breakout",
-                            source_features=["bb_upper", "bb_lower", "close", "volume"],
-                            quality_score=abs(volume_confirmed_breakout),
-                        )
-
-        except Exception as e:
-            logger.warning(f"Breakout indicator generation failed: {e}")
-
-        return features
+        """
+        DEPRECATED: Migrated to BreakoutIndicatorsIndicator in modular system.
+        Use src/core/indicators/enhanced/breakout_indicators.py instead.
+        """
+        logger.warning("⚠️ DEPRECATED: _generate_breakout_indicators migrated to modular indicators")
+        return {}
 
     async def update_feature_selection(
         self, instrument_id: int, timeframe: str, model_metadata: dict[str, Any]
     ) -> Optional[list[str]]:
         """
-        Update feature selection based on model training results
-        Called by LGBMTrainer after training completion
+        Update feature selection based on model training results.
+        Called by LGBMTrainer after training completion.
         """
         if not self.config.feature_selection.enabled:
+            logger.info("Feature selection is disabled in the configuration.")
             return None
 
+        logger.info(f"Updating feature selection for instrument {instrument_id} ({timeframe}).")
         try:
             model_key = f"{instrument_id}_{timeframe}"
-
-            # Extract feature importance from model metadata
             feature_importance = model_metadata.get("features", {}).get("importance", {})
             model_accuracy = model_metadata.get("metrics", {}).get("accuracy", 0.0)
             model_version = model_metadata.get("version_id", "unknown")
 
             if not feature_importance:
-                logger.warning(f"No feature importance data for {model_key}")
+                logger.error(f"No feature importance data provided for {model_key}. Cannot update feature selection.")
                 return None
 
-            # Store importance scores
             await self._store_feature_scores(
                 instrument_id, timeframe, feature_importance, model_accuracy, model_version
             )
-
-            # Calculate new feature selection
             selected_features = await self._calculate_optimal_feature_selection(instrument_id, timeframe)
 
             if selected_features:
-                # Update cache
                 self.selected_features_cache[model_key] = set(selected_features)
-
-                # Record metrics
                 metrics_registry.record_feature_selection_change(str(instrument_id), timeframe, "model_update")
                 metrics_registry.record_selected_features_count(str(instrument_id), timeframe, len(selected_features))
-
-                logger.info(f"Updated feature selection for {model_key}: {len(selected_features)} features selected")
+                logger.info(
+                    f"Successfully updated feature selection for {model_key}: {len(selected_features)} features selected."
+                )
+            else:
+                logger.warning(f"Optimal feature selection returned no features for {model_key}.")
 
             return selected_features
 
         except Exception as e:
             await self.error_handler.handle_error(
-                "feature_selection",
+                "feature_selection_update",
                 f"Feature selection update failed: {e}",
                 {"instrument_id": instrument_id, "timeframe": timeframe},
+                exc_info=True,
             )
             return None
 
     async def get_selected_features(self, instrument_id: int, timeframe: str) -> Optional[set[str]]:
-        """Get currently selected features for an instrument/timeframe"""
+        """Get currently selected features for an instrument/timeframe."""
         model_key = f"{instrument_id}_{timeframe}"
+        logger.debug(f"Getting selected features for {model_key}.")
 
-        # Return cached selection if available
         if model_key in self.selected_features_cache:
+            logger.debug(f"Returning cached feature selection for {model_key}.")
             return self.selected_features_cache[model_key]
 
-        # Load from database
         try:
+            logger.info(f"No cached selection found for {model_key}. Loading from database.")
             selected_features = await self._load_latest_feature_selection(instrument_id, timeframe)
             if selected_features:
                 self.selected_features_cache[model_key] = set(selected_features)
+                logger.info(f"Loaded and cached {len(selected_features)} features for {model_key}.")
                 return set(selected_features)
+            logger.warning(f"No feature selection found in the database for {model_key}.")
+            return None
         except Exception as e:
-            logger.warning(f"Failed to load feature selection for {model_key}: {e}")
-
-        return None
+            logger.error(f"Failed to get selected features for {model_key}: {e}", exc_info=True)
+            # Re-raise as a runtime error to indicate a critical failure in getting model configuration
+            raise RuntimeError(f"Could not load feature selection for {model_key}.") from e
 
     async def calculate_cross_asset_features(
         self, primary_instrument_id: int, timeframe: str, timestamp: datetime
     ) -> dict[str, float]:
-        """Calculate cross-asset correlation features"""
+        """Calculate cross-asset correlation features."""
         if not self.config.cross_asset.enabled:
+            logger.debug("Cross-asset feature calculation is disabled.")
             return {}
 
+        logger.debug(f"Calculating cross-asset features for instrument {primary_instrument_id} ({timeframe}).")
         try:
-            cross_features = {}
             cache_key = f"{primary_instrument_id}_{timeframe}_{timestamp.strftime('%Y%m%d_%H%M')}"
-
-            # Check cache first
             if cache_key in self.correlation_cache:
                 cached_value, cached_time = self.correlation_cache[cache_key]
                 if (timestamp - cached_time).total_seconds() < self.config.cross_asset.cache_duration_minutes * 60:
+                    logger.debug(f"Returning cached cross-asset features for {cache_key}.")
                     return {"cached_correlation": cached_value}
 
-            # Get related instruments (simplified - would normally come from config)
             related_instruments = await self._get_related_instruments(primary_instrument_id)
+            if not related_instruments:
+                logger.debug("No related instruments configured for cross-asset analysis.")
+                return {}
 
+            cross_features: dict[str, float] = {}
             for related_id, related_symbol in related_instruments[: self.config.cross_asset.max_related_instruments]:
                 correlation = await self._calculate_instrument_correlation(
                     primary_instrument_id, related_id, timeframe, timestamp
                 )
-
                 if abs(correlation) >= self.config.cross_asset.minimum_correlation_threshold:
                     feature_name = f"correlation_{related_symbol.lower()}"
                     cross_features[feature_name] = correlation
-
-                    # Record correlation metric
                     metrics_registry.record_cross_asset_correlation(
                         str(primary_instrument_id), related_symbol, timeframe, correlation
                     )
 
-            # Cache result
             if cross_features:
                 avg_correlation = float(np.mean(list(cross_features.values())))
                 self.correlation_cache[cache_key] = (avg_correlation, timestamp)
+                logger.info(
+                    f"Calculated {len(cross_features)} cross-asset features for instrument {primary_instrument_id}."
+                )
 
             return cross_features
 
         except Exception as e:
             await self.error_handler.handle_error(
-                "cross_asset_features",
+                "cross_asset_feature_calculation",
                 f"Cross-asset feature calculation failed: {e}",
                 {"instrument_id": primary_instrument_id, "timeframe": timeframe},
+                exc_info=True,
             )
             return {}
-
-    # Helper methods for database operations and calculations
-    async def _get_recent_ohlcv_data(self, instrument_id: int, timeframe: str, timestamp: datetime) -> pd.DataFrame:
-        """Get recent OHLCV data for feature generation"""
-        try:
-            start_time = timestamp - timedelta(days=max(self.config.feature_generation.lookback_periods) + 5)
-            ohlcv_data = await self.ohlcv_repo.get_ohlcv_data(instrument_id, timeframe, start_time, timestamp)
-            return (
-                pd.DataFrame(
-                    [
-                        {
-                            "timestamp": candle.ts,  # Use 'ts' instead of 'timestamp'
-                            "open": candle.open,
-                            "high": candle.high,
-                            "low": candle.low,
-                            "close": candle.close,
-                            "volume": candle.volume,
-                        }
-                        for candle in ohlcv_data
-                    ]
-                )
-                .set_index("timestamp")
-                .sort_index()
-            )
-        except Exception as e:
-            logger.warning(f"Failed to get recent OHLCV data: {e}")
-            return pd.DataFrame()
 
     async def _store_engineered_features(
         self, instrument_id: int, timeframe: str, timestamp: datetime, features: dict[str, EngineeredFeature]
     ) -> None:
-        """Store engineered features in database"""
+        """Store engineered features in the database."""
+        logger.debug(f"Storing {len(features)} engineered features for instrument {instrument_id} ({timeframe}).")
         try:
-            # Convert to database format and store
-            feature_records = []
-            for feature in features.values():
-                if feature.quality_score >= self.config.feature_generation.min_quality_score:
-                    feature_records.append(
-                        {
-                            "timestamp": timestamp,
-                            "feature_name": feature.name,
-                            "feature_value": feature.value,
-                            "generation_method": feature.generation_method,
-                            "source_features": feature.source_features,
-                            "quality_score": feature.quality_score,
-                        }
-                    )
+            feature_records = [
+                {
+                    "timestamp": timestamp,
+                    "feature_name": feature.name,
+                    "feature_value": feature.value,
+                    "generation_method": feature.generation_method,
+                    "source_features": feature.source_features,
+                    "quality_score": feature.quality_score,
+                }
+                for feature in features.values()
+                if feature.quality_score >= self.config.feature_generation.min_quality_score
+            ]
 
             if feature_records:
                 await self.feature_repo.insert_engineered_features(instrument_id, timeframe, feature_records)
+                logger.info(f"Successfully stored {len(feature_records)} engineered features.")
+            else:
+                logger.debug("No engineered features met the quality score threshold for storage.")
 
         except Exception as e:
-            logger.error(f"Failed to store engineered features: {e}")
+            logger.error(f"Failed to store engineered features for instrument {instrument_id}: {e}", exc_info=True)
+            # Do not re-raise here to avoid halting the entire pipeline for a storage error.
+            await self.error_handler.handle_error(
+                "feature_storage",
+                f"Failed to store engineered features: {e}",
+                {"instrument_id": instrument_id, "timeframe": timeframe},
+            )
+
+    def _calculate_feature_scores(self, history: list[dict[str, Any]]) -> dict[str, FeatureScore]:
+        """Calculates feature scores based on importance history."""
+        if not history:
+            logger.warning("Cannot calculate feature scores: importance history is empty.")
+            return {}
+
+        logger.debug(f"Calculating feature scores from a history of {len(history)} entries.")
+        feature_scores: dict[str, FeatureScore] = {}
+        all_features = {k for entry in history for k in entry.get("importance", {})}
+
+        for feature_name in all_features:
+            importance_scores = [
+                entry["importance"][feature_name] for entry in history if feature_name in entry.get("importance", {})
+            ]
+
+            if not importance_scores:
+                continue
+
+            avg_importance = float(np.mean(importance_scores))
+            stability = 1.0 / (np.std(importance_scores) + 1e-9) if len(importance_scores) >= 2 else 1.0
+            consistency = len(importance_scores) / len(history)
+
+            composite_score = (
+                avg_importance * self.config.feature_selection.importance_weight
+                + min(stability, 1.0) * self.config.feature_selection.stability_weight
+                + consistency * self.config.feature_selection.consistency_weight
+            )
+
+            feature_scores[feature_name] = FeatureScore(
+                feature_name=feature_name,
+                importance_score=avg_importance,
+                stability_score=float(min(stability, 1.0)),
+                consistency_score=consistency,
+                composite_score=float(composite_score),
+            )
+        logger.info(f"Calculated scores for {len(feature_scores)} unique features.")
+        return feature_scores
 
     async def _store_feature_scores(
         self,
@@ -630,13 +429,12 @@ class FeatureEngineeringPipeline:
         model_accuracy: float,
         model_version: str,
     ) -> None:
-        """Store feature importance scores for selection algorithm"""
+        """Store feature importance scores for the selection algorithm."""
+        logger.debug(f"Storing feature scores for instrument {instrument_id} ({timeframe}), model '{model_version}'.")
         try:
-            # Calculate stability and consistency scores from history
             model_key = f"{instrument_id}_{timeframe}"
             history = self.importance_history[model_key]
 
-            # Add current scores to history
             history.append(
                 {
                     "timestamp": datetime.now(),
@@ -646,169 +444,137 @@ class FeatureEngineeringPipeline:
                 }
             )
 
-            # Keep only recent history
             max_history = self.config.feature_selection.importance_history_length
             if len(history) > max_history:
-                history[:] = history[-max_history:]
+                self.importance_history[model_key] = history[-max_history:]
 
-            # Store feature scores in database
-            feature_score_records = []
-            for feature_name, importance in feature_importance.items():
-                feature_score_records.append(
-                    {
-                        "timestamp": datetime.now(),
-                        "feature_name": feature_name,
-                        "importance_score": importance,
-                        "stability_score": 1.0,  # Will be calculated later with more history
-                        "consistency_score": 1.0,  # Will be calculated later with more history
-                        "composite_score": importance,  # Simplified for first entry
-                        "model_version": model_version,
-                    }
-                )
+            feature_scores = self._calculate_feature_scores(self.importance_history[model_key])
+            if not feature_scores:
+                logger.warning("No feature scores were calculated, nothing to store.")
+                return
 
-            if feature_score_records:
-                await self.feature_repo.insert_feature_scores(instrument_id, timeframe, feature_score_records)
+            feature_score_records = [
+                {
+                    "training_timestamp": datetime.now(),
+                    "feature_name": scores.feature_name,
+                    "importance_score": scores.importance_score,
+                    "stability_score": scores.stability_score,
+                    "consistency_score": scores.consistency_score,
+                    "composite_score": scores.composite_score,
+                    "model_version": model_version,
+                }
+                for scores in feature_scores.values()
+            ]
+
+            await self.feature_repo.insert_feature_scores(instrument_id, timeframe, feature_score_records)
+            logger.info(f"Successfully stored {len(feature_score_records)} feature scores.")
 
         except Exception as e:
-            logger.error(f"Failed to store feature scores: {e}")
+            logger.error(f"Failed to store feature scores for instrument {instrument_id}: {e}", exc_info=True)
+            await self.error_handler.handle_error(
+                "feature_score_storage",
+                f"Failed to store feature scores: {e}",
+                {"instrument_id": instrument_id, "timeframe": timeframe},
+            )
 
     async def _calculate_optimal_feature_selection(self, instrument_id: int, timeframe: str) -> Optional[list[str]]:
-        """Calculate optimal feature selection using composite scoring"""
+        """Calculate optimal feature selection using composite scoring."""
+        logger.info(f"Calculating optimal feature selection for instrument {instrument_id} ({timeframe}).")
         try:
             model_key = f"{instrument_id}_{timeframe}"
-            history = self.importance_history[model_key]
+            history = self.importance_history.get(model_key, [])
 
-            if len(history) < 2:
+            if len(history) < self.config.feature_selection.min_history_for_selection:
+                logger.warning(
+                    f"Not enough history for feature selection for {model_key}: "
+                    f"{len(history)} < {self.config.feature_selection.min_history_for_selection} required. Using all features."
+                )
                 return None
 
-            # Calculate composite scores for each feature
-            feature_scores = {}
-            all_features = set()
+            feature_scores = self._calculate_feature_scores(history)
+            if not feature_scores:
+                logger.error(f"No feature scores could be calculated for {model_key}. Cannot perform selection.")
+                return None
 
-            # Collect all features across history
-            for entry in history:
-                all_features.update(entry["importance"].keys())
+            end_time = datetime.now(pytz.timezone(config.system.timezone))
+            start_time = end_time - timedelta(
+                days=self.config.feature_selection.correlation_data_lookback_multiplier * 30
+            )
+            historical_features_df = await self.feature_repo.get_features_for_correlation(
+                instrument_id, timeframe, start_time, end_time
+            )
 
-            for feature_name in all_features:
-                importance_scores = []
-                accuracies = []
+            selected_feature_scores = await self._remove_correlated_features(
+                feature_scores, historical_features_df, instrument_id, timeframe
+            )
 
-                for entry in history:
-                    if feature_name in entry["importance"]:
-                        importance_scores.append(entry["importance"][feature_name])
-                        accuracies.append(entry["accuracy"])
-
-                if len(importance_scores) >= 2:
-                    # Calculate component scores
-                    avg_importance = float(np.mean(importance_scores))
-                    stability = float(1.0 / (np.std(importance_scores) + 1e-8))
-                    consistency = float(len(importance_scores) / len(history))
-
-                    # Weighted composite score
-                    composite_score = float(
-                        avg_importance * self.config.feature_selection.importance_weight
-                        + min(stability, 1.0) * self.config.feature_selection.stability_weight
-                        + consistency * self.config.feature_selection.consistency_weight
-                    )
-
-                    feature_scores[feature_name] = FeatureScore(
-                        feature_name=feature_name,
-                        importance_score=avg_importance,
-                        stability_score=float(min(stability, 1.0)),
-                        consistency_score=consistency,
-                        composite_score=composite_score,
-                    )
-
-            # Remove highly correlated features
-            selected_features = await self._remove_correlated_features(feature_scores, instrument_id, timeframe)
-
-            # Sort by composite score and take top N
-            sorted_features = sorted(selected_features.values(), key=lambda x: x.composite_score, reverse=True)
-
+            sorted_features = sorted(selected_feature_scores.values(), key=lambda x: x.composite_score, reverse=True)
             target_count = self.config.feature_selection.target_feature_count
             final_selection = [f.feature_name for f in sorted_features[:target_count]]
 
-            # Store feature selection history
             if final_selection:
                 await self.feature_repo.insert_feature_selection_history(
                     instrument_id,
                     timeframe,
                     final_selection,
-                    {"method": "composite_scoring", "threshold": self.config.feature_selection.target_feature_count},
-                    len(all_features),
+                    {"method": "composite_scoring", "threshold": target_count},
+                    len(feature_scores),
                     "composite_scoring",
                     f"model_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
                 )
+                logger.info(f"Final feature selection for {model_key} has {len(final_selection)} features.")
+            else:
+                logger.warning(f"Feature selection process resulted in an empty feature set for {model_key}.")
 
             return final_selection
 
         except Exception as e:
-            logger.error(f"Feature selection calculation failed: {e}")
+            logger.error(f"Feature selection calculation failed for {instrument_id} ({timeframe}): {e}", exc_info=True)
             return None
 
     async def _remove_correlated_features(
-        self, feature_scores: dict[str, FeatureScore], instrument_id: int, timeframe: str
+        self,
+        feature_scores: dict[str, FeatureScore],
+        historical_features_df: pd.DataFrame,
+        instrument_id: int,
+        timeframe: str,
     ) -> dict[str, FeatureScore]:
         """Remove highly correlated features to reduce redundancy, prioritizing higher composite scores."""
         if not feature_scores:
             return {}
 
+        logger.debug(f"Removing correlated features for instrument {instrument_id} ({timeframe}).")
         try:
-            # Sort features by composite score in descending order
             sorted_features = sorted(feature_scores.values(), key=lambda x: x.composite_score, reverse=True)
             selected_features_names = [f.feature_name for f in sorted_features]
-
-            # Fetch historical feature data for correlation calculation
-            lookback_days = (
-                self.config.feature_selection.importance_history_length
-                * self.config.feature_selection.correlation_data_lookback_multiplier
-            )  # Use history length as a proxy for data needed
-            end_time = datetime.now(
-                pytz.timezone(ConfigLoader().get_config().system.timezone)
-            )  # Assuming APP_TIMEZONE is accessible
-            start_time = end_time - timedelta(days=lookback_days)
-
-            historical_features_df = await self.feature_repo.get_features_for_correlation(
-                instrument_id, timeframe, start_time, end_time
-            )
 
             if historical_features_df.empty or len(historical_features_df.columns) < 2:
                 logger.warning(
                     f"Insufficient historical data for correlation analysis for {instrument_id} ({timeframe}). Skipping correlation removal."
                 )
-                return feature_scores  # Return all features if not enough data
+                return feature_scores
 
-            # Filter historical_features_df to only include features present in selected_features_names
-            # And ensure all columns are numeric for correlation calculation
             cols_to_correlate = [
                 col
-                for col in historical_features_df.columns
-                if col in selected_features_names and pd.api.types.is_numeric_dtype(historical_features_df[col])
+                for col in selected_features_names
+                if col in historical_features_df.columns and pd.api.types.is_numeric_dtype(historical_features_df[col])
             ]
             if len(cols_to_correlate) < 2:
                 logger.warning(
-                    f"Not enough numeric features for correlation analysis after filtering for {instrument_id} ({timeframe}). Skipping correlation removal."
+                    f"Not enough numeric features for correlation analysis for {instrument_id} ({timeframe})."
                 )
                 return feature_scores
 
             filtered_df = historical_features_df[cols_to_correlate].dropna()
-
             if filtered_df.empty or len(filtered_df.columns) < 2:
-                logger.warning(
-                    f"Not enough clean data for correlation analysis after dropping NaNs for {instrument_id} ({timeframe}). Skipping correlation removal."
-                )
+                logger.warning(f"Not enough clean data for correlation analysis for {instrument_id} ({timeframe}).")
                 return feature_scores
 
             correlation_matrix = filtered_df.corr().abs()
-
-            # Initialize a set to store the names of features to keep
             features_to_keep_names: set[str] = set()
 
-            # Iterate through features sorted by composite score
             for feature_score in sorted_features:
                 current_feature_name = feature_score.feature_name
-
-                # If the feature is not already marked for removal and is in the correlation matrix
                 if (
                     current_feature_name in correlation_matrix.columns
                     and current_feature_name not in features_to_keep_names
@@ -823,11 +589,9 @@ class FeatureEngineeringPipeline:
                         ):
                             is_highly_correlated = True
                             break
-
                     if not is_highly_correlated:
                         features_to_keep_names.add(current_feature_name)
 
-            # Construct the new dictionary of feature scores with only the selected features
             reduced_feature_scores = {name: feature_scores[name] for name in features_to_keep_names}
             logger.info(
                 f"Reduced features for {instrument_id} ({timeframe}) from {len(feature_scores)} to {len(reduced_feature_scores)} after correlation analysis."
@@ -838,53 +602,62 @@ class FeatureEngineeringPipeline:
             logger.error(
                 f"Error during correlation-based feature removal for {instrument_id} ({timeframe}): {e}", exc_info=True
             )
-            return feature_scores  # Return original features in case of error
+            return feature_scores
 
     async def _get_related_instruments(self, primary_instrument_id: int) -> list[tuple[int, str]]:
-        """Get related instruments for cross-asset features"""
-        # Simplified implementation - would normally query instrument relationships
-        # For Indian markets, common relationships:
-        related_instruments = config.model_training.feature_engineering.cross_asset.instruments
-        return [(rid, name) for rid, name in related_instruments.items() if rid != primary_instrument_id]
+        """Get related instruments for cross-asset features."""
+        related_instruments = self.config.cross_asset.instruments
+        if not related_instruments:
+            logger.warning("No cross-asset instruments configured.")
+            return []
+        return [(int(rid), name) for rid, name in related_instruments.items() if int(rid) != primary_instrument_id]
 
     async def _calculate_instrument_correlation(
         self, primary_id: int, related_id: int, timeframe: str, timestamp: datetime
     ) -> float:
-        """Calculate correlation between two instruments"""
+        """Calculate correlation between two instruments."""
+        logger.debug(f"Calculating correlation between {primary_id} and {related_id} for timeframe {timeframe}.")
         try:
             lookback_days = self.config.cross_asset.correlation_lookback_days
             start_time = timestamp - timedelta(days=lookback_days)
 
-            # Get price data for both instruments
             primary_data = await self.ohlcv_repo.get_ohlcv_data(primary_id, timeframe, start_time, timestamp)
             related_data = await self.ohlcv_repo.get_ohlcv_data(related_id, timeframe, start_time, timestamp)
 
             if len(primary_data) < 10 or len(related_data) < 10:
+                logger.warning(
+                    f"Insufficient data to correlate {primary_id} and {related_id}. Need at least 10 data points."
+                )
                 return 0.0
 
-            # Convert to returns and calculate correlation
             primary_returns = pd.Series([c.close for c in primary_data]).pct_change().dropna()
             related_returns = pd.Series([c.close for c in related_data]).pct_change().dropna()
 
-            # Align by timestamp and calculate correlation
             min_length = min(len(primary_returns), len(related_returns))
             if min_length < 5:
+                logger.warning(f"Insufficient overlapping returns to correlate {primary_id} and {related_id}.")
                 return 0.0
 
             correlation = np.corrcoef(
                 primary_returns.iloc[-min_length:].values, related_returns.iloc[-min_length:].values
             )[0, 1]
 
-            return correlation if not np.isnan(correlation) else 0.0
+            return float(correlation) if np.isfinite(correlation) else 0.0
 
         except Exception as e:
-            logger.warning(f"Correlation calculation failed: {e}")
-            return 0.0
+            logger.error(f"Error calculating correlation between {primary_id} and {related_id}: {e}", exc_info=True)
+            raise RuntimeError("Instrument correlation calculation failed.") from e
 
     async def _load_latest_feature_selection(self, instrument_id: int, timeframe: str) -> Optional[list[str]]:
-        """Load latest feature selection from database"""
+        """Load latest feature selection from the database."""
+        logger.debug(f"Loading latest feature selection for instrument {instrument_id} ({timeframe}).")
         try:
-            return await self.feature_repo.get_latest_feature_selection(instrument_id, timeframe)
+            selection = await self.feature_repo.get_latest_feature_selection(instrument_id, timeframe)
+            if selection:
+                logger.info(f"Successfully loaded {len(selection)} selected features from database.")
+            else:
+                logger.info("No feature selection found in database.")
+            return selection
         except Exception as e:
-            logger.warning(f"Failed to load feature selection: {e}")
-            return None
+            logger.error(f"Database error loading feature selection: {e}", exc_info=True)
+            raise RuntimeError("Failed to load feature selection from database.") from e

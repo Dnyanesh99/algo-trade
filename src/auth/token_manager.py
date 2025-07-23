@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from kiteconnect.exceptions import TokenException
+from kiteconnect.exceptions import NetworkException, TokenException
 
 from src.utils.logger import LOGGER as logger
 
@@ -20,6 +20,7 @@ class TokenManager:
     _instance: Optional["TokenManager"] = None
     _lock: threading.Lock = threading.Lock()
     _access_token: Optional[str] = None
+    _refresh_token: Optional[str] = None
     _token_file_path: Path
     _last_validation_time: float = 0
     _validation_cache_duration: float = 300  # 5 minutes
@@ -32,95 +33,141 @@ class TokenManager:
             if cls._instance is None:
                 cls._instance = super().__new__(cls)
                 cls._instance._access_token = None
+                cls._instance._refresh_token = None
                 cls._instance._last_validation_time = 0
                 cls._instance._is_token_valid = False
                 cls._instance._auth_failure_count = 0
 
-                # Get token file path from environment variable with default
-                token_file_path = os.getenv("ACCESS_TOKEN_FILE_PATH", "config/access_token.json")
-                cls._instance._token_file_path = Path(token_file_path)
-                cls._instance._load_token_from_file()
-                logger.info("TokenManager initialized.")
+                token_file_path_str = os.getenv("ACCESS_TOKEN_FILE_PATH")
+                if not token_file_path_str:
+                    logger.error("ACCESS_TOKEN_FILE_PATH environment variable not set.")
+                    raise ValueError("ACCESS_TOKEN_FILE_PATH is not set in the environment.")
+
+                cls._instance._token_file_path = Path(token_file_path_str)
+                cls._instance._load_tokens_from_file()
+                logger.info(f"TokenManager initialized. Token file path: '{cls._instance._token_file_path}'")
         return cls._instance
 
     def __init__(self) -> None:
         pass
 
-    def _save_token_to_file(self, token: str) -> None:
-        """
-        Saves the access token to a file with secure permissions.
-        """
+    def _save_tokens_to_file(self, access_token: str, refresh_token: str) -> None:
+        """Saves access and refresh tokens to a file."""
+        if not access_token:
+            logger.error("Attempted to save empty access token. Aborting file save.")
+            return
         try:
             self._token_file_path.parent.mkdir(parents=True, exist_ok=True)
             with open(self._token_file_path, "w") as f:
-                json.dump({"access_token": token}, f)
-            # Set file permissions to 600 (read/write for owner only)
+                json.dump({"access_token": access_token, "refresh_token": refresh_token}, f)
             os.chmod(self._token_file_path, 0o600)
-            logger.info(f"Access token saved to {self._token_file_path} with secure permissions.")
+            logger.info(f"Tokens securely saved to {self._token_file_path}")
         except OSError as e:
-            logger.error(f"Failed to save access token to file {self._token_file_path}: {e}")
+            logger.critical(f"CRITICAL: Failed to save tokens to file '{self._token_file_path}': {e}", exc_info=True)
+            raise RuntimeError(f"Could not persist tokens to {self._token_file_path}") from e
 
-    def _load_token_from_file(self) -> None:
-        """
-        Loads the access token from a file.
-        """
+    def _load_tokens_from_file(self) -> None:
+        """Loads access and refresh tokens from a file."""
         if self._token_file_path.exists():
             try:
+                logger.debug(f"Attempting to load tokens from '{self._token_file_path}'")
                 with open(self._token_file_path) as f:
                     data = json.load(f)
-                    token = data.get("access_token")
-                    if token and token.strip():
-                        self._access_token = token.strip()
-                        logger.info(f"Access token loaded from {self._token_file_path}")
+                    self._access_token = data.get("access_token")
+                    self._refresh_token = data.get("refresh_token")
+                    if self._access_token:
+                        if self._refresh_token:
+                            logger.info(f"Access and refresh tokens successfully loaded from {self._token_file_path}")
+                        else:
+                            logger.info(f"Access token successfully loaded from {self._token_file_path} (no refresh token)")
                     else:
-                        self._access_token = None
-                        logger.warning(f"Access token file {self._token_file_path} is empty or malformed.")
+                        logger.warning(
+                            f"Token file '{self._token_file_path}' is missing 'access_token'."
+                        )
             except (OSError, json.JSONDecodeError) as e:
-                logger.error(f"Failed to load access token from file {self._token_file_path}: {e}")
+                logger.error(f"Failed to read or parse token file '{self._token_file_path}': {e}", exc_info=True)
+                # Corrupt or unreadable file, treat as if no token is available
+                self._access_token = None
+                self._refresh_token = None
         else:
-            logger.info(f"Access token file {self._token_file_path} does not exist. No token loaded.")
+            logger.info(f"Token file '{self._token_file_path}' does not exist. No tokens loaded.")
 
-    def set_access_token(self, token: str) -> None:
-        """
-        Sets the access token and persists it to a file.
-        """
-        if not isinstance(token, str) or not token:
-            raise ValueError("Access token must be a non-empty string.")
+    def set_tokens(self, access_token: str, refresh_token: str) -> None:
+        """Sets the access and refresh tokens, ensuring access token is not empty."""
+        if not access_token:
+            logger.error("Attempted to set empty access token.")
+            raise ValueError("Access token cannot be empty.")
+        
+        if not refresh_token:
+            logger.warning("Refresh token is empty. Only access token will be stored.")
+
         with self._lock:
-            self._access_token = token
-            self._save_token_to_file(token)
-            # Reset validation state when new token is set
-            self._last_validation_time = 0
+            self._access_token = access_token
+            self._refresh_token = refresh_token
+            logger.info("In-memory tokens updated. Persisting to file.")
+            self._save_tokens_to_file(access_token, refresh_token)
+            self._last_validation_time = 0  # Invalidate cache
             self._is_token_valid = False
-            self._auth_failure_count = 0
-        logger.info("Access token set successfully.")
+            self.reset_auth_failures()  # Reset failure count on new tokens
+        if refresh_token:
+            logger.info("Access and refresh tokens set successfully.")
+        else:
+            logger.info("Access token set successfully (no refresh token provided).")
 
     def get_access_token(self) -> Optional[str]:
-        """
-        Retrieves the stored access token.
-        """
+        """Retrieves the stored access token."""
         with self._lock:
-            token = self._access_token
-        if token is None:
-            logger.warning("Attempted to retrieve access token, but no token is set.")
-        return token
+            return self._access_token
 
-    def clear_access_token(self) -> None:
-        """
-        Clears the stored access token (e.g., on logout or token expiry).
-        Also deletes the token file.
-        """
+    def get_refresh_token(self) -> Optional[str]:
+        """Retrieves the stored refresh token."""
+        with self._lock:
+            return self._refresh_token
+
+    def clear_tokens(self) -> None:
+        """Clears tokens and deletes the token file."""
         with self._lock:
             self._access_token = None
+            self._refresh_token = None
             self._last_validation_time = 0
             self._is_token_valid = False
             if self._token_file_path.exists():
                 try:
                     self._token_file_path.unlink()
-                    logger.info(f"Access token file {self._token_file_path} deleted.")
+                    logger.info(f"Token file {self._token_file_path} deleted.")
                 except OSError as e:
-                    logger.error(f"Failed to delete access token file {self._token_file_path}: {e}")
-        logger.info("Access token cleared.")
+                    logger.error(f"Failed to delete token file: {e}")
+        logger.info("All tokens cleared.")
+
+    async def refresh_access_token(self, api_key: str, api_secret: str) -> bool:
+        """Refreshes the access token using the refresh token."""
+        refresh_token = self.get_refresh_token()
+        if not refresh_token:
+            logger.error("No refresh token available to refresh access token.")
+            return False
+
+        logger.info("Attempting to refresh access token...")
+        try:
+            import asyncio
+
+            from kiteconnect import KiteConnect
+
+            kite = KiteConnect(api_key=api_key)
+            # The generate_session method is used for both initial generation and refreshing
+            data = await asyncio.to_thread(kite.generate_session, refresh_token, api_secret)
+            new_access_token = data["access_token"]
+            new_refresh_token = data.get(
+                "refresh_token", refresh_token
+            )  # Use old refresh token if new one isn't provided
+            self.set_tokens(new_access_token, new_refresh_token)
+            logger.info("Access token refreshed successfully.")
+            return True
+        except (TokenException, NetworkException) as e:
+            logger.error(f"Failed to refresh access token: {e}. The session may be expired.")
+            return False
+        except Exception as e:
+            logger.error(f"Unexpected error during token refresh: {e}")
+            return False
 
     def is_token_available(self) -> bool:
         """

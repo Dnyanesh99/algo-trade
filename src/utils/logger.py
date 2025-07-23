@@ -32,27 +32,29 @@ class LoggerSetup:
 
         # Ensure log directory exists
         if logging_config:
-            log_file_path = Path(logging_config.file)
-            log_file_path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                log_file_path = Path(logging_config.file)
+                log_file_path.parent.mkdir(parents=True, exist_ok=True)
 
-            # Add file logging with comprehensive settings
-            # For production, consider serialize=True for structured JSON logs
-            # which are easier for log aggregation systems (e.g., ELK, Splunk).
-            # For production, backtrace and diagnose should be False to avoid leaking sensitive data.
-            # These could be enabled in a development environment via environment variables.
-            logger.add(
-                logging_config.file,
-                level=logging_config.level,
-                format=logging_config.format,
-                rotation=logging_config.rotation,
-                compression=logging_config.compression,
-                retention=logging_config.retention,
-                enqueue=True,
-                backtrace=False,
-                diagnose=False,
-                catch=True,
-                serialize=False,  # Changed to False for readable logs
-            )
+                # Add file logging with comprehensive settings
+                logger.add(
+                    logging_config.file,
+                    level=logging_config.level,
+                    format=logging_config.format,
+                    rotation=logging_config.rotation,
+                    compression=logging_config.compression,
+                    retention=logging_config.retention,
+                    enqueue=True,
+                    backtrace=False,
+                    diagnose=False,
+                    catch=True,
+                    serialize=False,
+                )
+            except Exception as e:
+                # Log to stderr if file logging setup fails
+                logger.opt(raw=True).error(
+                    f"CRITICAL: Failed to set up file logger: {e}\nLogging will proceed to console only."
+                )
 
             # Add console logging for development/debugging
             logger.add(
@@ -67,18 +69,14 @@ class LoggerSetup:
             )
 
         # Configure standard logging to work with Loguru
-        # This ensures third-party libraries using standard logging are captured
         class InterceptHandler(logging.Handler):
             def emit(self, record: logging.LogRecord) -> None:
-                # Get corresponding Loguru level if it exists
                 level: str
                 try:
                     level = logger.level(record.levelname).name
                 except ValueError:
                     level = str(record.levelno)
 
-                # Find caller from where record originated
-                # Start with depth=1 and walk up the stack to find the actual caller
                 depth: int = 1
                 frame: Optional[FrameType] = sys._getframe(depth)
                 while frame and (frame.f_code.co_filename == logging.__file__ or frame.f_code.co_filename == __file__):
@@ -90,7 +88,6 @@ class LoggerSetup:
 
                 logger.opt(depth=depth, exception=record.exc_info).log(level, record.getMessage())
 
-        # Replace standard logging
         if logging_config:
             logging.basicConfig(handlers=[InterceptHandler()], level=getattr(logging, logging_config.level), force=True)
         else:
@@ -107,4 +104,6 @@ class LoggerSetup:
 
 # Export the logger instance (initialize in main application)
 LOGGER = logger
+logger = logger  # Export logger directly for backward compatibility
+__all__ = ["logger", "LOGGER", "LoggerSetup"]
 # Hot reload test comment

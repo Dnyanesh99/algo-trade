@@ -80,6 +80,7 @@ instrument_repo:
     WHERE instrument_id = $13;
   get_instrument_by_tradingsymbol: "SELECT * FROM instruments WHERE tradingsymbol = $1 AND exchange = $2;"
   get_instrument_by_token: "SELECT * FROM instruments WHERE instrument_token = $1;"
+  get_instrument_by_id: "SELECT * FROM instruments WHERE instrument_id = $1;"
   get_all_instruments: "SELECT * FROM instruments;"
   get_instruments_by_type: "SELECT * FROM instruments WHERE instrument_type = $1 AND exchange = $2;"
 
@@ -125,9 +126,9 @@ ohlcv_repo:
         close = EXCLUDED.close,
         volume = EXCLUDED.volume,
         oi = EXCLUDED.oi
-  get_ohlcv_data: "SELECT * FROM {table_name} WHERE instrument_id = $1 AND ts BETWEEN $2 AND $3 ORDER BY ts ASC"
-  get_latest_candle: "SELECT * FROM {table_name} WHERE instrument_id = $1 ORDER BY ts DESC LIMIT 1"
-  get_ohlcv_data_for_features: "SELECT ts, open, high, low, close, volume FROM {table_name} WHERE instrument_id = $1 ORDER BY ts DESC LIMIT $2"
+  get_ohlcv_data: "SELECT ts, open, high, low, close, volume, oi FROM {table_name} WHERE instrument_id = $1 AND ts BETWEEN $2 AND $3 ORDER BY ts ASC"
+  get_latest_candle: "SELECT ts, open, high, low, close, volume, oi FROM {table_name} WHERE instrument_id = $1 ORDER BY ts DESC LIMIT 1"
+  get_ohlcv_data_for_features: "SELECT ts, open, high, low, close, volume, oi FROM {table_name} WHERE instrument_id = $1 ORDER BY ts DESC LIMIT $2"
   check_data_availability: "SELECT COUNT(*) as candle_count FROM {table_name} WHERE ts >= $1 AND ts <= $2"
 
 signal_repo:
@@ -152,6 +153,88 @@ signal_repo:
     ORDER BY ts DESC
     LIMIT $2
 
+model_registry:
+  insert_model: |
+    INSERT INTO model_registry 
+    (version, training_end_date, accuracy, f1_score, sharpe_ratio, max_drawdown, 
+     total_signals, profitable_signals, config, is_active)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+    RETURNING id
+  get_active_model: |
+    SELECT id, version, created_at, training_end_date, accuracy, f1_score, 
+           sharpe_ratio, max_drawdown, total_signals, profitable_signals, config
+    FROM model_registry 
+    WHERE is_active = TRUE
+    LIMIT 1
+  get_model_by_version: |
+    SELECT id, version, created_at, training_end_date, accuracy, f1_score,
+           sharpe_ratio, max_drawdown, total_signals, profitable_signals, config, is_active
+    FROM model_registry 
+    WHERE version = $1
+  get_model_history: |
+    SELECT id, version, created_at, training_end_date, accuracy, f1_score,
+           sharpe_ratio, max_drawdown, total_signals, profitable_signals, is_active
+    FROM model_registry 
+    ORDER BY created_at DESC
+    LIMIT $1
+  deactivate_all_models: |
+    UPDATE model_registry SET is_active = FALSE WHERE is_active = TRUE
+  activate_model: |
+    UPDATE model_registry SET is_active = TRUE WHERE version = $1
+
+chart_repo:
+  get_chart_data: |
+    SELECT ts, open, high, low, close, volume, oi 
+    FROM {table_name} 
+    WHERE instrument_id = $1 
+    AND ts BETWEEN $2 AND $3 
+    ORDER BY ts ASC
+  get_chart_data_latest: |
+    SELECT ts, open, high, low, close, volume, oi 
+    FROM {table_name} 
+    WHERE instrument_id = $1 
+    ORDER BY ts DESC 
+    LIMIT $2
+  get_chart_data_with_indicators: |
+    SELECT 
+      o.ts, o.open, o.high, o.low, o.close, o.volume, o.oi,
+      f.feature_name, f.feature_value
+    FROM {table_name} o
+    LEFT JOIN features f ON o.ts = f.ts AND o.instrument_id = f.instrument_id AND f.timeframe = $4
+    WHERE o.instrument_id = $1 
+    AND o.ts BETWEEN $2 AND $3
+    ORDER BY o.ts ASC
+  get_realtime_chart_data: |
+    SELECT ts, open, high, low, close, volume, oi 
+    FROM {table_name} 
+    WHERE instrument_id = $1 
+    AND ts > $2 
+    ORDER BY ts DESC 
+    LIMIT $3
+  get_instruments_for_chart: |
+    SELECT instrument_id, tradingsymbol, name, exchange, segment, instrument_type, last_price
+    FROM instruments 
+    WHERE tradingsymbol ILIKE $1 OR name ILIKE $1
+    ORDER BY tradingsymbol ASC
+    LIMIT $2
+  get_chart_data_summary: |
+    SELECT 
+      COUNT(*) as total_candles,
+      MIN(ts) as start_time,
+      MAX(ts) as end_time,
+      MIN(low) as min_price,
+      MAX(high) as max_price,
+      SUM(volume) as total_volume
+    FROM {table_name}
+    WHERE instrument_id = $1
+    AND ts BETWEEN $2 AND $3
+  check_table_exists: |
+    SELECT EXISTS (
+        SELECT 1
+        FROM information_schema.tables
+        WHERE table_name = $1
+    )
+
 migrate:
   create_migrations_table: |
     CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -161,3 +244,186 @@ migrate:
     );
   get_applied_migrations: "SELECT version FROM schema_migrations ORDER BY executed_at"
   insert_migration: "INSERT INTO schema_migrations (version, execution_time_ms) VALUES ($1, $2)"
+
+
+label_stats_repo:
+  insert_stats: |
+    INSERT INTO labeling_statistics (
+        symbol, timeframe, total_bars, labeled_bars, label_distribution, 
+        avg_return_by_label, exit_reasons, avg_holding_period, 
+        processing_time_ms, data_quality_score, sharpe_ratio, 
+        win_rate, profit_factor, run_timestamp
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+
+processing_state_repo:
+  insert_processing_state: |
+    INSERT INTO processing_state (instrument_id, process_type, completed_at, metadata)
+    VALUES ($1, $2, $3, $4)
+    ON CONFLICT (instrument_id, process_type)
+    DO UPDATE SET
+        completed_at = EXCLUDED.completed_at,
+        metadata = EXCLUDED.metadata
+  check_processing_complete: |
+    SELECT EXISTS(
+        SELECT 1 FROM processing_state 
+        WHERE instrument_id = $1 AND process_type = $2
+    )
+  get_last_processing_timestamp: |
+    SELECT completed_at
+    FROM processing_state
+    WHERE instrument_id = $1 AND process_type = $2
+  delete_specific_processing_state: |
+    DELETE FROM processing_state
+    WHERE instrument_id = $1 AND process_type = $2
+  delete_processing_state_by_instrument: |
+    DELETE FROM processing_state
+    WHERE instrument_id = $1
+  delete_all_processing_state: |
+    DELETE FROM processing_state
+  get_processing_summary: |
+    SELECT instrument_id, process_type, completed_at
+    FROM processing_state
+    ORDER BY completed_at DESC
+  get_instruments_needing_processing: |
+    SELECT DISTINCT i.instrument_id
+    FROM instruments i
+    LEFT JOIN processing_state ps ON i.instrument_id = ps.instrument_id AND ps.process_type = $1
+    WHERE ps.instrument_id IS NULL
+  cleanup_old_processing_state: |
+    DELETE FROM processing_state
+    WHERE completed_at < NOW() - INTERVAL '%s days'
+  upsert_data_range: |
+    INSERT INTO data_ranges (instrument_id, timeframe, earliest_ts, latest_ts, last_updated)
+    VALUES ($1, $2, $3, $4, $5)
+    ON CONFLICT (instrument_id, timeframe)
+    DO UPDATE SET
+        earliest_ts = LEAST(data_ranges.earliest_ts, EXCLUDED.earliest_ts),
+        latest_ts = GREATEST(data_ranges.latest_ts, EXCLUDED.latest_ts),
+        last_updated = EXCLUDED.last_updated
+  get_data_range: |
+    SELECT earliest_ts, latest_ts
+    FROM data_ranges
+    WHERE instrument_id = $1 AND timeframe = $2
+  delete_data_ranges_by_instrument: |
+    DELETE FROM data_ranges
+    WHERE instrument_id = $1
+  delete_all_data_ranges: |
+    DELETE FROM data_ranges
+  get_data_ranges_summary: |
+    SELECT instrument_id, timeframe, earliest_ts, latest_ts, last_updated
+    FROM data_ranges
+    ORDER BY last_updated DESC
+  get_all_processing_states: |
+    SELECT instrument_id, process_type as processing_type, completed_at, metadata 
+    FROM processing_state
+  get_all_data_ranges: |
+    SELECT instrument_id, timeframe, earliest_ts, latest_ts 
+    FROM data_ranges
+  check_historical_data_availability: |
+    SELECT COUNT(*) as count FROM ohlcv_1min
+    WHERE instrument_id = $1
+    AND ts >= NOW() - INTERVAL '{lookback_days} days'
+  check_aggregation_data_availability: |
+    SELECT COUNT(*) as count FROM ohlcv_1min
+    WHERE instrument_id = $1
+    AND ts >= NOW() - INTERVAL '{lookback_days} days'
+  check_aggregated_timeframe_data: |
+    SELECT COUNT(*) as count FROM ohlcv_{timeframe}min
+    WHERE instrument_id = $1
+    AND ts >= NOW() - INTERVAL '{lookback_days} days'
+  check_features_timeframe_data: |
+    SELECT COUNT(*) as count FROM ohlcv_{timeframe}min
+    WHERE instrument_id = $1
+    AND ts >= NOW() - INTERVAL '{lookback_days} days'
+  check_existing_features: |
+    SELECT COUNT(DISTINCT ts) as count FROM features
+    WHERE instrument_id = $1
+    AND ts >= NOW() - INTERVAL '{lookback_days} days'
+  check_labeling_ohlcv_data: |
+    SELECT COUNT(*) as count FROM ohlcv_{timeframe}min
+    WHERE instrument_id = $1
+    AND ts >= NOW() - INTERVAL '{lookback_days} days'
+  check_labeling_features_data: |
+    SELECT COUNT(DISTINCT ts) as count FROM features
+    WHERE instrument_id = $1 AND timeframe = $2
+    AND ts >= NOW() - INTERVAL '{lookback_days} days'
+  check_existing_labels: |
+    SELECT COUNT(*) as count FROM labels
+    WHERE instrument_id = $1
+    AND ts >= NOW() - INTERVAL '{lookback_days} days'
+  has_actual_data_historical: |
+    SELECT COUNT(*) as count FROM ohlcv_1min
+    WHERE instrument_id = $1
+    AND ts >= NOW() - INTERVAL '7 days'
+  has_actual_data_aggregation: |
+    SELECT COUNT(*) as count FROM ohlcv_1min
+    WHERE instrument_id = $1
+    AND ts >= NOW() - INTERVAL '7 days'
+  has_actual_data_aggregated_timeframe: |
+    SELECT COUNT(*) as count FROM ohlcv_{timeframe}min
+    WHERE instrument_id = $1
+    AND ts >= NOW() - INTERVAL '3 days'
+  has_actual_data_features_timeframe: |
+    SELECT COUNT(*) as count FROM ohlcv_{timeframe}min
+    WHERE instrument_id = $1
+    AND ts >= NOW() - INTERVAL '3 days'
+  has_actual_data_existing_features: |
+    SELECT COUNT(DISTINCT ts) as count FROM features
+    WHERE instrument_id = $1
+    AND ts >= NOW() - INTERVAL '2 days'
+  has_actual_data_labeling_ohlcv: |
+    SELECT COUNT(*) as count FROM ohlcv_{timeframe}min
+    WHERE instrument_id = $1
+    AND ts >= NOW() - INTERVAL '5 days'
+  has_actual_data_labeling_features: |
+    SELECT COUNT(DISTINCT ts) as count FROM features
+    WHERE instrument_id = $1 AND timeframe = $2
+    AND ts >= NOW() - INTERVAL '5 days'
+  has_actual_data_existing_labels: |
+    SELECT COUNT(*) as count FROM labels
+    WHERE instrument_id = $1
+    AND ts >= NOW() - INTERVAL '3 days'
+
+ohlcv_repo:
+  insert_ohlcv_data: |
+    INSERT INTO {table_name} (ts, instrument_id, open, high, low, close, volume, oi)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+    ON CONFLICT (instrument_id, ts) DO UPDATE
+    SET open = EXCLUDED.open,
+        high = EXCLUDED.high,
+        low = EXCLUDED.low,
+        close = EXCLUDED.close,
+        volume = EXCLUDED.volume,
+        oi = EXCLUDED.oi
+  get_ohlcv_data: "SELECT ts, open, high, low, close, volume, oi FROM {table_name} WHERE instrument_id = $1 AND ts BETWEEN $2 AND $3 ORDER BY ts ASC"
+  get_latest_candle: "SELECT ts, open, high, low, close, volume, oi FROM {table_name} WHERE instrument_id = $1 ORDER BY ts DESC LIMIT 1"
+  get_ohlcv_data_for_features: "SELECT ts, open, high, low, close, volume, oi FROM {table_name} WHERE instrument_id = $1 ORDER BY ts DESC LIMIT $2"
+  check_data_availability: "SELECT COUNT(*) as candle_count FROM {table_name} WHERE ts >= $1 AND ts <= $2"
+  get_data_range: |
+    SELECT MIN(ts) as earliest_ts, MAX(ts) as latest_ts
+    FROM {table_name}
+    WHERE instrument_id = $1
+  find_data_gaps: |
+    WITH data_with_gaps AS (
+        SELECT
+            ts,
+            LAG(ts) OVER (ORDER BY ts) as prev_ts,
+            EXTRACT(EPOCH FROM (ts - LAG(ts) OVER (ORDER BY ts))) / 60 as gap_minutes
+        FROM {table_name}
+        WHERE instrument_id = $1
+        AND ts BETWEEN $2 AND $3
+        ORDER BY ts
+    ),
+    gaps AS (
+        SELECT
+            prev_ts + INTERVAL '{interval_minutes} minutes' as gap_start,
+            ts - INTERVAL '{interval_minutes} minutes' as gap_end
+        FROM data_with_gaps
+        WHERE gap_minutes > {interval_minutes_threshold}
+    )
+    SELECT gap_start, gap_end FROM gaps
+    ORDER BY gap_start
+  get_data_range_for_instrument: |
+    SELECT MIN(ts) as earliest_ts, MAX(ts) as latest_ts
+    FROM {table_name}
+    WHERE instrument_id = $1

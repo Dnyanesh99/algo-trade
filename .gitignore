@@ -195,7 +195,7 @@ coverage.xml
 # TA-Lib build artifacts
 ta-lib/
 
-config/config.yaml
+# config/config.yaml
 GEMINI.md
 review.txt
 README.dev.md
@@ -206,4 +206,7 @@ docs/ZerodhaKiteConnect.txt
 docs/project_docs.txt
 
 # Generated Docker requirements file
-requirements.txt 
+requirements.txt
+report.txt 
+removed.txt
+env_template.txt

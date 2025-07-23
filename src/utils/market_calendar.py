@@ -25,8 +25,12 @@ class MarketCalendar:
 
     def __init__(self, system_config: SystemConfig, market_calendar_config: MarketCalendarConfig) -> None:
         if not system_config:
+            logger.error("ConfigurationError: System configuration is required for MarketCalendar initialization.")
             raise ValueError("System configuration is required")
         if not market_calendar_config:
+            logger.error(
+                "ConfigurationError: Market calendar configuration is required for MarketCalendar initialization."
+            )
             raise ValueError("Market calendar configuration is required")
 
         self.tz = pytz.timezone(system_config.timezone)
@@ -76,8 +80,10 @@ class MarketCalendar:
             # In a real scenario, this would be an API call using a tool like web_fetch.
             # For this example, we will simulate a failed API call to test the fallback.
             logger.warning("Simulating failed API call for holidays.")
+            # Simulate an error for testing purposes
+            # raise RuntimeError("Simulated API call failure")
         except Exception as e:
-            logger.error(f"Error fetching holidays from API: {e}")
+            logger.error(f"Error fetching holidays from API: {e}", exc_info=True)
         return holidays
 
     def _is_muhurat_trading(self, dt_local: datetime) -> bool:

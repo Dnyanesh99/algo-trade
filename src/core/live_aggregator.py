@@ -7,7 +7,6 @@ from typing import Any, Callable, Optional
 import pandas as pd
 from pydantic import BaseModel, Field
 
-from src.core.candle_validator import CandleValidator
 from src.database.models import OHLCVData
 from src.database.ohlcv_repo import OHLCVRepository
 from src.state.error_handler import ErrorHandler
@@ -15,6 +14,7 @@ from src.state.health_monitor import HealthMonitor
 from src.utils.config_loader import ConfigLoader
 from src.utils.logger import LOGGER as logger
 from src.utils.time_helper import get_candle_start_time
+from src.validation.candle_validator import CandleValidator
 
 # Load configuration
 config = ConfigLoader().get_config()
@@ -66,19 +66,34 @@ class LiveAggregator:
         health_monitor: HealthMonitor,
         on_15min_candle_complete: Optional[Callable[[dict[str, Any]], Any]] = None,
     ):
-        # Core dependencies
+        if not isinstance(ohlcv_repo, OHLCVRepository):
+            raise TypeError("ohlcv_repo must be a valid OHLCVRepository instance.")
+        if not isinstance(error_handler, ErrorHandler) or not isinstance(health_monitor, HealthMonitor):
+            raise TypeError("error_handler and health_monitor must be valid instances.")
+
         self.ohlcv_repo = ohlcv_repo
         self.error_handler = error_handler
         self.health_monitor = health_monitor
-        self.candle_validator = CandleValidator()
+        self.candle_validator = CandleValidator(config.data_quality)
 
-        # Configuration from config.yaml
-        if config.trading is None:
-            raise ValueError("Trading configuration is required")
+        if not all(
+            [
+                config.trading,
+                config.live_aggregator,
+                config.data_quality,
+                config.data_quality.validation,
+                config.model_training,
+                config.model_training.feature_engineering,
+                config.model_training.feature_engineering.cross_asset,
+            ]
+        ):
+            raise ValueError("Trading, live_aggregator, data_quality, and model_training configurations are required.")
+
         if config.live_aggregator is None:
-            raise ValueError("Live aggregator configuration is required")
-        if config.data_quality is None:
-            raise ValueError("Data quality configuration is required")
+            raise ValueError("Live aggregator configuration is missing")
+        if config.data_quality.validation is None:
+            raise ValueError("Data quality validation configuration is missing")
+
         self.timeframes = config.trading.aggregation_timeframes
         self.max_partial_candles = config.live_aggregator.max_partial_candles
         self.partial_candle_cleanup_hours = config.live_aggregator.partial_candle_cleanup_hours
@@ -91,23 +106,18 @@ class LiveAggregator:
         )
         self.validation_enabled = config.data_quality.validation.enabled
 
-        # Callbacks
         self.on_15min_candle_complete = on_15min_candle_complete
 
-        # State management - thread-safe
-        self._partial_candles: dict[int, dict[int, dict[str, Any]]] = {}  # {timeframe: {instrument_token: candle_data}}
-        self._last_processed_timestamp: dict[int, dict[int, datetime]] = {}  # {timeframe: {instrument_token: last_ts}}
+        self._partial_candles: dict[int, dict[int, dict[str, Any]]] = {}
+        self._last_processed_timestamp: dict[int, dict[int, datetime]] = {}
         self._processing_lock = asyncio.Lock()
         self._active_instruments: set[int] = set()
 
-        # NEW: Cross-Asset Data Collection
         self._cross_asset_instruments = config.model_training.feature_engineering.cross_asset.instruments
-        self._cross_asset_data: dict[int, dict[str, Any]] = {}  # {instrument_id: latest_candle_data}
+        self._cross_asset_data: dict[int, dict[str, Any]] = {}
 
-        # Performance tracking
         self.stats = AggregationStats()
 
-        # Initialize timeframe structures
         for tf in self.timeframes:
             self._partial_candles[tf] = {}
             self._last_processed_timestamp[tf] = {}
@@ -115,146 +125,110 @@ class LiveAggregator:
         logger.info(
             f"LiveAggregator initialized with timeframes {self.timeframes}, "
             f"validation_enabled={self.validation_enabled}, "
-            f"cross_asset_instruments={len(self._cross_asset_instruments)}"
+            f"cross_asset_instruments={len(self._cross_asset_instruments)}."
         )
 
     async def process_one_minute_candle(self, candle: dict[str, Any]) -> bool:
         """
         Processes an incoming 1-minute candle to build higher timeframe candles.
-
-        Args:
-            candle: Dictionary containing candle data
-
-        Returns:
-            bool: True if processing was successful, False otherwise
         """
         processing_start = datetime.now()
+        try:
+            candle_data = CandleData(**candle)
+        except Exception as e:
+            await self.error_handler.handle_error(
+                "live_aggregator_validation", f"Invalid candle data: {e}", {"candle": candle}, exc_info=True
+            )
+            self.stats.validation_failures += 1
+            return False
+
+        instrument_token = candle_data.instrument_token
+        logger.debug(f"Processing 1-min candle for instrument {instrument_token} at {candle_data.start_time}.")
 
         try:
-            # Validate input candle data
-            try:
-                candle_data = CandleData(**candle)
-            except Exception as e:
-                await self.error_handler.handle_error(
-                    "live_aggregator", f"Invalid candle data: {e}", {"candle": candle}
-                )
-                self.stats.validation_failures += 1
-                return False
-
-            # Extract validated data
-            instrument_token = candle_data.instrument_token
-            timestamp = candle_data.start_time
-            open_price = candle_data.open
-            high_price = candle_data.high
-            low_price = candle_data.low
-            close_price = candle_data.close
-            volume = candle_data.volume
-            oi = candle_data.oi or 0.0
-
-            # Track active instruments
             self._active_instruments.add(instrument_token)
-
-            # NEW: Collect cross-asset data for correlation analysis
             await self._collect_cross_asset_data(instrument_token, candle_data)
 
-            # Memory management check
-            total_partial = sum(len(tf_candles) for tf_candles in self._partial_candles.values())
-            if total_partial > self.max_partial_candles:
+            if sum(len(tf_candles) for tf_candles in self._partial_candles.values()) > self.max_partial_candles:
                 await self._cleanup_old_partial_candles()
 
             async with self._processing_lock:
                 for tf in self.timeframes:
-                    success = await self._process_timeframe(
-                        tf, instrument_token, timestamp, open_price, high_price, low_price, close_price, volume, oi
-                    )
-
-                    if not success:
+                    if not await self._process_timeframe(tf, candle_data):
                         self.stats.failed_aggregations += 1
                         await self.error_handler.handle_error(
-                            "live_aggregator",
+                            "live_aggregator_timeframe",
                             f"Failed to process {tf}-min timeframe for instrument {instrument_token}",
-                            {"timeframe": tf, "instrument_token": instrument_token, "timestamp": timestamp},
+                            {
+                                "timeframe": tf,
+                                "instrument_token": instrument_token,
+                                "timestamp": candle_data.start_time,
+                            },
                         )
 
-            # Update statistics
             self.stats.total_candles_processed += 1
             self.stats.successful_aggregations += 1
-            self.stats.last_processed_timestamp = timestamp
+            self.stats.last_processed_timestamp = candle_data.start_time
 
-            # Update performance metrics
-            processing_time = (datetime.now() - processing_start).total_seconds() * 1000
+            processing_time_ms = (datetime.now() - processing_start).total_seconds() * 1000
+            total_processed = self.stats.total_candles_processed
             self.stats.avg_processing_time_ms = (
-                self.stats.avg_processing_time_ms * (self.stats.total_candles_processed - 1) + processing_time
-            ) / self.stats.total_candles_processed
-
-            # self.performance_metrics.record_latency(...)
+                (self.stats.avg_processing_time_ms * (total_processed - 1) + processing_time_ms) / total_processed
+                if total_processed > 0
+                else processing_time_ms
+            )
 
             return True
 
         except Exception as e:
             self.stats.failed_aggregations += 1
             await self.error_handler.handle_error(
-                "live_aggregator", f"Unexpected error processing candle: {e}", {"candle": candle, "error": str(e)}
+                "live_aggregator_processing",
+                f"Unexpected error processing candle: {e}",
+                {"candle": candle, "error": str(e)},
+                exc_info=True,
             )
             return False
 
-    async def _process_timeframe(
-        self,
-        tf: int,
-        instrument_token: int,
-        timestamp: datetime,
-        open_price: float,
-        high_price: float,
-        low_price: float,
-        close_price: float,
-        volume: float,
-        oi: float,
-    ) -> bool:
+    async def _process_timeframe(self, tf: int, candle_data: CandleData) -> bool:
         """
         Process a single timeframe aggregation.
-
-        Returns:
-            bool: True if successful, False otherwise
         """
+        instrument_token = candle_data.instrument_token
+        timestamp = candle_data.start_time
         try:
-            # Determine the start time of the current higher-timeframe candle
             tf_candle_start_time = self._get_candle_start_time(timestamp, tf)
-
             current_partial_candle = self._partial_candles[tf].get(instrument_token)
 
             if current_partial_candle is None or tf_candle_start_time > current_partial_candle["start_time"]:
-                # New higher-timeframe candle starts or first candle for this instrument/timeframe
-                if current_partial_candle is not None:  # Emit previous completed candle if exists
-                    emit_success = await self._emit_and_store_candle(current_partial_candle)
-                    if not emit_success:
-                        return False
+                if current_partial_candle and not await self._emit_and_store_candle(current_partial_candle):
+                    return False
 
                 self._partial_candles[tf][instrument_token] = {
                     "instrument_token": instrument_token,
                     "timeframe": tf,
                     "start_time": tf_candle_start_time,
-                    "open": open_price,
-                    "high": high_price,
-                    "low": low_price,
-                    "close": close_price,
-                    "volume": volume,
-                    "oi": oi,
+                    "open": candle_data.open,
+                    "high": candle_data.high,
+                    "low": candle_data.low,
+                    "close": candle_data.close,
+                    "volume": candle_data.volume,
+                    "oi": candle_data.oi or 0.0,
                 }
-                logger.debug(f"Started new {tf}-min live candle for {instrument_token} at {tf_candle_start_time}")
+                logger.debug(f"Started new {tf}-min live candle for {instrument_token} at {tf_candle_start_time}.")
 
             elif tf_candle_start_time == current_partial_candle["start_time"]:
-                # Update existing higher-timeframe candle
-                current_partial_candle["high"] = max(current_partial_candle["high"], high_price)
-                current_partial_candle["low"] = min(current_partial_candle["low"], low_price)
-                current_partial_candle["close"] = close_price
-                current_partial_candle["volume"] += volume
-                current_partial_candle["oi"] = oi  # Update OI with the latest 1-min candle's OI
-                logger.debug(f"Updated {tf}-min live candle for {instrument_token} at {tf_candle_start_time}")
+                current_partial_candle["high"] = max(current_partial_candle["high"], candle_data.high)
+                current_partial_candle["low"] = min(current_partial_candle["low"], candle_data.low)
+                current_partial_candle["close"] = candle_data.close
+                current_partial_candle["volume"] += candle_data.volume
+                current_partial_candle["oi"] = candle_data.oi or 0.0
+                logger.debug(f"Updated {tf}-min live candle for {instrument_token} at {tf_candle_start_time}.")
 
             else:
-                logger.warning(
-                    f"Out-of-sequence 1-min candle for {instrument_token} ({tf}-min). "
-                    f"Expected: {current_partial_candle['start_time']}, Got: {tf_candle_start_time}"
+                logger.error(
+                    f"Out-of-sequence 1-min candle for {instrument_token} ({tf}min). "
+                    f"Expected start time >= {current_partial_candle['start_time']}, but got {tf_candle_start_time}."
                 )
                 return False
 
@@ -262,24 +236,19 @@ class LiveAggregator:
             return True
 
         except Exception as e:
-            logger.error(f"Error processing {tf}-min timeframe for {instrument_token}: {e}")
+            logger.error(f"Error processing {tf}-min timeframe for {instrument_token}: {e}", exc_info=True)
             return False
 
     async def _emit_and_store_candle(self, candle_data: dict[str, Any]) -> bool:
         """
         Emits the completed candle via callback and stores it in the database.
-
-        Returns:
-            bool: True if successful, False otherwise
         """
         tf_str = f"{candle_data['timeframe']}min"
         instrument_token = candle_data["instrument_token"]
         start_time = candle_data["start_time"]
-
-        logger.info(f"Emitting and storing completed {tf_str} candle for {instrument_token} at {start_time}")
+        logger.info(f"Emitting and storing completed {tf_str} candle for {instrument_token} at {start_time}.")
 
         try:
-            # Validate candle before storage if enabled
             if self.validation_enabled:
                 validation_df = pd.DataFrame(
                     [
@@ -293,70 +262,51 @@ class LiveAggregator:
                         }
                     ]
                 )
-                validation_result = await self.candle_validator.validate_candles(
-                    validation_df, instrument_token, tf_str
+                is_valid, _, quality_report = self.candle_validator.validate(
+                    validation_df, symbol=str(instrument_token), instrument_type="UNKNOWN", timeframe=tf_str
                 )
-                if not validation_result.is_valid:
-                    logger.warning(
-                        f"Candle validation failed for {tf_str} candle {instrument_token}: "
-                        f"{validation_result.validation_errors}"
-                    )
+                if not is_valid:
                     self.stats.validation_failures += 1
+                    logger.error(
+                        f"Candle validation failed for {tf_str} candle {instrument_token}. Issues: {quality_report.issues}"
+                    )
+                    # Do not store invalid candles
                     return False
 
-            # Store in database
             await self.ohlcv_repo.insert_ohlcv_data(
-                instrument_token,
-                tf_str,
-                [
-                    OHLCVData(
-                        ts=start_time,
-                        open=candle_data["open"],
-                        high=candle_data["high"],
-                        low=candle_data["low"],
-                        close=candle_data["close"],
-                        volume=int(candle_data["volume"]),
-                        oi=int(candle_data["oi"]) if candle_data["oi"] is not None else None,
-                    )
-                ],
+                instrument_token, tf_str, [OHLCVData.model_validate(candle_data, from_attributes=True)]
             )
-            logger.debug(f"Successfully stored {tf_str} candle for {instrument_token}")
+            logger.debug(f"Successfully stored {tf_str} candle for {instrument_token}.")
 
-            # self.health_monitor.record_successful_operation("live_aggregator")
-
-            # Trigger 15-min event if applicable
             if candle_data["timeframe"] == 15 and self.on_15min_candle_complete:
+                logger.debug("Invoking 15-min candle completion callback.")
                 try:
                     result = self.on_15min_candle_complete(candle_data)
                     if asyncio.iscoroutine(result):
                         await result
                 except Exception as e:
-                    logger.error(f"Error in 15-min candle complete callback: {e}")
+                    logger.error(f"Error in 15-min candle complete callback: {e}", exc_info=True)
 
             return True
 
         except Exception as e:
             self.stats.storage_failures += 1
             await self.error_handler.handle_error(
-                "live_aggregator",
+                "live_aggregator_storage",
                 f"Failed to store {tf_str} candle for {instrument_token}: {e}",
-                {
-                    "instrument_token": instrument_token,
-                    "timeframe": tf_str,
-                    "candle_data": candle_data,
-                    "error": str(e),
-                },
+                {"instrument_token": instrument_token, "timeframe": tf_str, "candle_data": candle_data},
+                exc_info=True,
             )
             return False
 
     async def _cleanup_old_partial_candles(self) -> None:
         """Clean up old partial candles to prevent memory leaks."""
+        logger.debug("Running cleanup of old partial candles.")
         try:
             current_time = datetime.now()
-            # --- SUGGESTION IMPLEMENTED: Use configured cleanup hours ---
             cutoff_time = current_time - timedelta(hours=self.partial_candle_cleanup_hours)
-
             cleaned_count = 0
+
             for tf in self.timeframes:
                 to_remove = [
                     token for token, data in self._partial_candles[tf].items() if data["start_time"] < cutoff_time
@@ -368,10 +318,10 @@ class LiveAggregator:
                     cleaned_count += 1
 
             if cleaned_count > 0:
-                logger.info(f"Cleaned up {cleaned_count} old partial candles")
+                logger.info(f"Cleaned up {cleaned_count} old partial candles older than {cutoff_time}.")
 
         except Exception as e:
-            logger.error(f"Error during partial candle cleanup: {e}")
+            logger.error(f"Error during partial candle cleanup: {e}", exc_info=True)
 
     def _get_candle_start_time(self, timestamp: datetime, timeframe_minutes: int) -> datetime:
         """
@@ -386,19 +336,24 @@ class LiveAggregator:
         """
         logger.info("Flushing all partial live candles...")
         flushed_count = 0
-
         async with self._processing_lock:
             for tf in self.timeframes:
-                candles_to_flush = list(self._partial_candles[tf].items())
-                for instrument_token, candle_data in candles_to_flush:
+                candles_to_flush = list(self._partial_candles[tf].values())
+                logger.debug(f"Flushing {len(candles_to_flush)} partial candles for timeframe {tf}min.")
+                for candle_data in candles_to_flush:
                     try:
                         if await self._emit_and_store_candle(candle_data):
                             flushed_count += 1
-                        del self._partial_candles[tf][instrument_token]
+                        # Remove after processing, regardless of success, to avoid reprocessing
+                        if candle_data["instrument_token"] in self._partial_candles[tf]:
+                            del self._partial_candles[tf][candle_data["instrument_token"]]
                     except Exception as e:
-                        logger.error(f"Error flushing {tf}-min candle for {instrument_token}: {e}")
+                        instrument_token = candle_data.get("instrument_token", "unknown")
+                        logger.error(
+                            f"Error flushing {tf}-min candle for instrument {instrument_token}: {e}", exc_info=True
+                        )
 
-        logger.info(f"Flushed {flushed_count} partial live candles")
+        logger.info(f"Flushed a total of {flushed_count} partial live candles.")
         return flushed_count
 
     def get_aggregation_stats(self) -> dict[str, Any]:
@@ -423,6 +378,7 @@ class LiveAggregator:
 
     async def health_check(self) -> dict[str, Any]:
         """Perform health check of the aggregator."""
+        logger.debug("Performing health check on LiveAggregator.")
         stats = self.get_aggregation_stats()
         total_processed = stats["total_candles_processed"]
         validation_failure_rate = (stats["validation_failures"] / total_processed) if total_processed > 0 else 0
@@ -432,9 +388,11 @@ class LiveAggregator:
             and stats["avg_processing_time_ms"] < self.health_check_avg_processing_time_ms_threshold
             and validation_failure_rate < self.health_check_validation_failures_threshold
         )
+        status = "healthy" if is_healthy else "degraded"
+        logger.info(f"LiveAggregator health check status: {status}.")
         return {
             "is_healthy": is_healthy,
-            "status": "healthy" if is_healthy else "degraded",
+            "status": status,
             "stats": stats,
             "timestamp": datetime.now().isoformat(),
         }
@@ -442,49 +400,38 @@ class LiveAggregator:
     async def _collect_cross_asset_data(self, instrument_token: int, candle_data: CandleData) -> None:
         """
         Collect and store cross-asset data for correlation analysis.
-
-        Args:
-            instrument_token: Token of the instrument
-            candle_data: Validated candle data
         """
+        if instrument_token not in self._cross_asset_instruments:
+            return
+
+        logger.debug(f"Collecting cross-asset data for instrument {instrument_token}.")
         try:
-            # Check if this instrument is one of our cross-asset instruments
-            if instrument_token in self._cross_asset_instruments:
-                symbol_name = self._cross_asset_instruments[instrument_token]
-
-                # Store latest candle data for cross-asset correlation
-                self._cross_asset_data[instrument_token] = {
-                    "symbol": symbol_name,
-                    "timestamp": candle_data.start_time,
-                    "open": candle_data.open,
-                    "high": candle_data.high,
-                    "low": candle_data.low,
-                    "close": candle_data.close,
-                    "volume": candle_data.volume,
-                    "last_updated": datetime.now(),
-                }
-
-                logger.debug(
-                    f"Updated cross-asset data for {symbol_name} (token: {instrument_token}): "
-                    f"close={candle_data.close}, time={candle_data.start_time}"
-                )
-
-                # Store in database for historical correlation analysis
-                await self._store_cross_asset_ohlcv(instrument_token, candle_data)
-
+            symbol_name = self._cross_asset_instruments[instrument_token]
+            self._cross_asset_data[instrument_token] = {
+                "symbol": symbol_name,
+                "timestamp": candle_data.start_time,
+                "open": candle_data.open,
+                "high": candle_data.high,
+                "low": candle_data.low,
+                "close": candle_data.close,
+                "volume": candle_data.volume,
+                "last_updated": datetime.now(),
+            }
+            await self._store_cross_asset_ohlcv(instrument_token, candle_data)
         except Exception as e:
-            logger.warning(f"Failed to collect cross-asset data for {instrument_token}: {e}")
+            await self.error_handler.handle_error(
+                "cross_asset_collection",
+                f"Failed to collect cross-asset data for {instrument_token}: {e}",
+                {"instrument_token": instrument_token},
+                exc_info=True,
+            )
 
     async def _store_cross_asset_ohlcv(self, instrument_token: int, candle_data: CandleData) -> None:
         """
-        Store cross-asset OHLCV data in database for correlation analysis.
-
-        Args:
-            instrument_token: Token of the cross-asset instrument
-            candle_data: Validated candle data
+        Store cross-asset OHLCV data in the database for correlation analysis.
         """
+        logger.debug(f"Storing cross-asset OHLCV data for instrument {instrument_token}.")
         try:
-            # Convert to OHLCVData model for database storage
             ohlcv_data = OHLCVData(
                 ts=candle_data.start_time,
                 open=candle_data.open,
@@ -494,14 +441,14 @@ class LiveAggregator:
                 volume=int(candle_data.volume),
                 oi=int(candle_data.oi) if candle_data.oi is not None else None,
             )
-
-            # Store 1-minute data for cross-asset instruments
             await self.ohlcv_repo.insert_ohlcv_data(instrument_token, "1min", [ohlcv_data])
-
-            logger.debug(f"Stored cross-asset OHLCV data for instrument {instrument_token}")
-
         except Exception as e:
-            logger.warning(f"Failed to store cross-asset OHLCV data for {instrument_token}: {e}")
+            await self.error_handler.handle_error(
+                "cross_asset_storage",
+                f"Failed to store cross-asset OHLCV data for {instrument_token}: {e}",
+                {"instrument_token": instrument_token},
+                exc_info=True,
+            )
 
     def get_cross_asset_data(self) -> dict[int, dict[str, Any]]:
         """

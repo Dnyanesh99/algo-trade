@@ -30,7 +30,7 @@ class HealthMonitor:
         self.system_state = system_state
         self.ws_client = ws_client
         self.db_manager = db_manager
-        self._monitor_task: Optional[asyncio.Task] = None
+        self._monitor_task: Optional[asyncio.Task[None]] = None
         self._last_data_timestamp: dict[int, datetime] = {}
         self._monitor_interval = health_monitor_config.monitor_interval
         self.data_freshness_threshold = timedelta(minutes=health_monitor_config.data_freshness_threshold_minutes)
@@ -56,7 +56,7 @@ class HealthMonitor:
         health_info = {"status": "connected" if is_connected else "disconnected"}
         self.system_state.update_component_health("WebSocket", health_info)
         if not is_connected:
-            logger.warning("WebSocket is disconnected.")
+            logger.error("CRITICAL: WebSocket is disconnected. Real-time data flow is interrupted.")
 
     async def _check_database_health(self) -> None:
         """
@@ -71,7 +71,7 @@ class HealthMonitor:
         except Exception as e:
             health_info = {"status": "disconnected", "error": str(e)}
             self.system_state.update_component_health("Database", health_info)
-            logger.error(f"Database connection failed: {e}")
+            logger.error(f"CRITICAL: Database connection failed: {e}", exc_info=True)
 
     async def _check_data_freshness(self) -> None:
         """
@@ -81,7 +81,9 @@ class HealthMonitor:
 
         for instrument_token, last_ts in self._last_data_timestamp.items():
             if current_time - last_ts > self.data_freshness_threshold:
-                logger.warning(f"Data for instrument {instrument_token} is stale. Last update: {last_ts}")
+                logger.error(
+                    f"CRITICAL: Data for instrument {instrument_token} is stale. Last update: {last_ts}. Data freshness threshold: {self.data_freshness_threshold}"
+                )
                 self.system_state.update_component_health(
                     f"DataFreshness_{instrument_token}", {"status": "stale", "last_update": last_ts}
                 )

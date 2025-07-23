@@ -8,12 +8,13 @@ import joblib
 import lightgbm as lgb
 import numpy as np
 import pandas as pd
+from numpy.typing import NDArray
 from pydantic import BaseModel
 
 from src.metrics.registry import metrics_registry
 from src.state.error_handler import ErrorHandler
 from src.state.health_monitor import HealthMonitor
-from src.utils.config_loader import ConfigLoader, ModelTrainingConfig
+from src.utils.config_loader import ConfigLoader
 from src.utils.logger import LOGGER as logger
 
 config_loader = ConfigLoader()
@@ -53,30 +54,27 @@ class ModelPredictor:
         error_handler: ErrorHandler,
         health_monitor: HealthMonitor,
     ):
+        # Type hints ensure error_handler and health_monitor are valid instances
+
         self.error_handler = error_handler
         self.health_monitor = health_monitor
 
-        # Model storage
-        self.models: dict[str, dict[str, Any]] = {}  # {model_key: {model, metadata, scaler, stats}}
-        self.active_models: dict[str, str] = {}  # {model_key: version_id}
+        self.models: dict[str, dict[str, Any]] = {}
+        self.active_models: dict[str, str] = {}
 
-        # Configuration
-        self.predictor_config: ModelTrainingConfig
-        if config.model_training is None:
-            raise ValueError("Model training configuration is required")
+        if not config.model_training or not config.model_training.predictor:
+            logger.error(
+                "ValueError: model_training.predictor configuration is required for ModelPredictor initialization."
+            )
+            raise ValueError("model_training.predictor configuration is required.")
         self.predictor_config = config.model_training
         self.artifacts_path = Path(self.predictor_config.artifacts_path)
 
-        # Feature monitoring
         self.prediction_history: list[PredictionResult] = []
-
-        # Confidence calibration
-        if self.predictor_config is None:
-            raise ValueError("Predictor configuration is required")
         self.confidence_threshold = self.predictor_config.confidence_threshold
         self.calibration_params: dict[str, Any] = {}
 
-        logger.info("ModelPredictor initialized with production configuration")
+        logger.info("ModelPredictor initialized with production configuration.")
 
     async def load_model(
         self, model_path: Path, instrument_id: int, timeframe: str, set_as_active: bool = True
@@ -85,37 +83,41 @@ class ModelPredictor:
         Loads a model with all associated artifacts, including feature statistics.
         """
         start_time = time.time()
+        model_key = f"{instrument_id}_{timeframe}"
+        logger.info(f"Attempting to load model for {model_key} from path: {model_path}.")
+
         try:
             model_dir = model_path.parent if model_path.is_file() else model_path
-            model_file = model_dir / self.predictor_config.predictor.required_artifacts["model"]
-            metadata_path = model_dir / self.predictor_config.predictor.required_artifacts["metadata"]
-            scaler_path = model_dir / self.predictor_config.predictor.required_artifacts["scaler"]
-            stats_path = model_dir / self.predictor_config.predictor.required_artifacts["feature_stats"]
 
-            # --- Rigorous Artifact Validation ---
             required_artifacts = self.predictor_config.predictor.required_artifacts
-            for name, path_str in required_artifacts.items():
-                path = model_dir / path_str
-                if not path.exists():
-                    logger.error(f"Required model artifact '{name}' not found: {path}")
-                    return False
-            # --- End Validation ---
+            artifact_paths = {name: model_dir / path_str for name, path_str in required_artifacts.items()}
 
-            model = lgb.Booster(model_file=str(model_file))
-            with open(metadata_path) as f:
+            for name, path in artifact_paths.items():
+                if not path.exists():
+                    logger.critical(
+                        f"CRITICAL: Required model artifact '{name}' not found at: {path}. Model loading aborted."
+                    )
+                    raise FileNotFoundError(f"Missing required model artifact: {path}")
+
+            model = lgb.Booster(model_file=str(artifact_paths["model"]))
+            with open(artifact_paths["metadata"]) as f:
                 metadata = json.load(f)
-            scaler = joblib.load(scaler_path)
-            with open(stats_path) as f:
+            scaler = joblib.load(artifact_paths["scaler"])
+            with open(artifact_paths["feature_stats"]) as f:
                 feature_stats = json.load(f)
 
             if not self._validate_model(model, metadata):
-                logger.error("Model validation failed")
+                logger.critical(
+                    f"CRITICAL: Model validation failed for {model_key} from {model_path}. Model is corrupted or incompatible. Aborting load."
+                )
                 return False
 
-            model_key = f"{instrument_id}_{timeframe}"
             version_id = metadata.get("version_id", "unknown")
+            if version_id == "unknown":
+                logger.warning(f"Model metadata for {model_key} is missing 'version_id'. Using 'unknown'.")
 
-            self.models[f"{model_key}_{version_id}"] = {
+            full_model_key = f"{model_key}_{version_id}"
+            self.models[full_model_key] = {
                 "model": model,
                 "metadata": metadata,
                 "scaler": scaler,
@@ -127,27 +129,37 @@ class ModelPredictor:
 
             if set_as_active:
                 self.active_models[model_key] = version_id
-                logger.info(f"Set active model for {model_key}: version {version_id}")
+                logger.info(f"Set active model for {model_key}: version {version_id}.")
 
             calibration_path = model_dir / "calibration.json"
             if calibration_path.exists():
-                with open(calibration_path) as f:
-                    self.calibration_params[model_key] = json.load(f)
+                try:
+                    with open(calibration_path) as f:
+                        self.calibration_params[model_key] = json.load(f)
+                    logger.info(f"Loaded calibration parameters for {model_key}.")
+                except (json.JSONDecodeError, OSError) as e:
+                    logger.warning(
+                        f"Failed to load calibration file for {model_key}: {e}. Proceeding without calibration."
+                    )
 
             loading_duration = time.time() - start_time
             metrics_registry.observe_histogram("model_loading_duration_seconds", loading_duration)
             metrics_registry.increment_counter("model_loading_total", {"status": "success"})
 
-            logger.info(f"Successfully loaded model and all artifacts from {model_dir}")
+            logger.info(
+                f"Successfully loaded model and all artifacts for {model_key} from {model_dir} in {loading_duration:.2f}s."
+            )
             return True
 
         except Exception as e:
-            logger.error(f"Error loading model from {model_path}: {e}", exc_info=True)
             loading_duration = time.time() - start_time
             metrics_registry.observe_histogram("model_loading_duration_seconds", loading_duration)
             metrics_registry.increment_counter("model_loading_total", {"status": "failure"})
             await self.error_handler.handle_error(
-                "model_predictor", f"Model loading failed: {e}", {"model_path": str(model_path), "error": str(e)}
+                "model_loading",
+                f"Model loading failed for {model_key} from {model_path}: {e}",
+                {"model_path": str(model_path), "error": str(e)},
+                exc_info=True,
             )
             return False
 
@@ -159,25 +171,29 @@ class ModelPredictor:
         """
         start_time = time.time()
         model_key = f"{instrument_id}_{timeframe}"
+        logger.debug(f"Attempting prediction for {model_key}.")
 
         try:
-            if model_key not in self.active_models:
-                logger.error(f"No active model for {model_key}")
+            version_id = self.active_models.get(model_key)
+            if not version_id:
+                logger.error(f"PredictionError: No active model found for {model_key}. Cannot predict.")
                 return None
 
-            version_id = self.active_models[model_key]
             model_info = self.models.get(f"{model_key}_{version_id}")
-
             if not model_info:
-                logger.error(f"Model not found: {model_key}_{version_id}")
+                logger.error(
+                    f"PredictionError: Model version {version_id} for {model_key} not found in loaded models. Cannot predict."
+                )
                 return None
 
             validation_result = await self._validate_features(feature_vector, model_info["metadata"])
             if not validation_result["valid"]:
-                logger.error(f"Feature validation failed: {validation_result['errors']}")
+                logger.error(
+                    f"PredictionError: Feature validation failed for {model_key}: {validation_result['errors']}. Cannot predict."
+                )
                 await self.error_handler.handle_error(
-                    "model_predictor",
-                    "Invalid features",
+                    "prediction_feature_validation",
+                    f"Invalid features for {model_key}",
                     {"errors": validation_result["errors"], "features": feature_vector},
                 )
                 return None
@@ -188,9 +204,7 @@ class ModelPredictor:
 
             drift_detected = await self._check_feature_drift(model_key, features_df, model_info["feature_stats"])
             if drift_detected:
-                logger.warning(f"Feature drift detected for {model_key}")
-                # Note: Feature drift detected - would update health monitor if method existed
-                logger.warning(f"Feature drift warning recorded for {model_key}")
+                logger.warning(f"Feature drift detected for {model_key}. This may impact prediction reliability.")
 
             model = model_info["model"]
             raw_prediction = model.predict(features_df, num_iteration=model.best_iteration)
@@ -213,14 +227,17 @@ class ModelPredictor:
             model_info["prediction_count"] += 1
             self.prediction_history.append(prediction_result)
 
-            # Record comprehensive prediction metrics
             await self._record_prediction_metrics(prediction_result, model_info, start_time)
 
             if prediction_result.prediction != 0:
                 logger.info(
                     f"Prediction for {instrument_id} ({timeframe}): "
                     f"{['SELL', 'NEUTRAL', 'BUY'][prediction_result.prediction + 1]} "
-                    f"(confidence: {prediction_result.confidence:.2%})"
+                    f"(confidence: {prediction_result.confidence:.2%}, risk: {prediction_result.risk_assessment['risk_level']})"
+                )
+            else:
+                logger.info(
+                    f"Prediction for {instrument_id} ({timeframe}): NEUTRAL (confidence: {prediction_result.confidence:.2%}, risk: {prediction_result.risk_assessment['risk_level']})"
                 )
 
             return prediction_result
@@ -233,8 +250,8 @@ class ModelPredictor:
                 if model_info:
                     model_info["error_count"] += 1
             await self.error_handler.handle_error(
-                "model_predictor",
-                f"Prediction failed: {e}",
+                "prediction_execution",
+                f"Prediction failed for {model_key}: {e}",
                 {
                     "instrument_id": instrument_id,
                     "timeframe": timeframe,
@@ -250,59 +267,83 @@ class ModelPredictor:
         """
         Efficient batch prediction for multiple instruments.
         """
+        if not predictions_request:
+            logger.warning("predict_batch called with empty predictions_request.")
+            return []
+
+        logger.info(f"Starting batch prediction for {len(predictions_request)} requests.")
         results: list[Optional[PredictionResult]] = []
         grouped_requests: dict[str, list[tuple[int, str, dict[str, float]]]] = {}
         for instrument_id, timeframe, features in predictions_request:
             model_key = f"{instrument_id}_{timeframe}"
-            if model_key not in grouped_requests:
-                grouped_requests[model_key] = []
-            grouped_requests[model_key].append((instrument_id, timeframe, features))
+            grouped_requests.setdefault(model_key, []).append((instrument_id, timeframe, features))
 
         for model_key, requests in grouped_requests.items():
             if model_key not in self.active_models:
-                logger.warning(f"No model loaded for {model_key}")
+                logger.warning(f"No active model loaded for {model_key}. Skipping {len(requests)} predictions.")
                 results.extend([None] * len(requests))
                 continue
             for instrument_id, timeframe, features in requests:
-                result = await self.predict(instrument_id, timeframe, features)
-                results.append(result)
+                try:
+                    result = await self.predict(instrument_id, timeframe, features)
+                    results.append(result)
+                except Exception as e:
+                    logger.error(f"Error during batch prediction for {instrument_id} ({timeframe}): {e}", exc_info=True)
+                    results.append(None)
+        logger.info(f"Batch prediction completed. Processed {len(predictions_request)} requests.")
         return results
 
     def _validate_model(self, model: lgb.Booster, metadata: dict[str, Any]) -> bool:
         """
         Validates model integrity and compatibility.
         """
+        logger.debug("Validating loaded model and its metadata.")
         try:
             if metadata.get("model_type") != "LightGBM":
-                logger.error(f"Invalid model type: {metadata.get('model_type')}")
-                return False
-
-            expected_features = len(metadata["features"]["names"])
-            model_features = model.num_feature()
-            if model_features != expected_features:
                 logger.error(
-                    f"Feature count mismatch: model has {model_features}, metadata specifies {expected_features}"
+                    f"ModelValidationFailed: Invalid model type '{metadata.get('model_type')}'. Expected 'LightGBM'."
                 )
                 return False
 
-            test_input = np.zeros((1, model_features))
+            expected_features = metadata["features"]["names"]
+            if not expected_features:
+                logger.error("ModelValidationFailed: Metadata does not contain expected feature names.")
+                return False
+
+            model_features_count = model.num_feature()
+            if model_features_count != len(expected_features):
+                logger.error(
+                    f"ModelValidationFailed: Feature count mismatch. Model has {model_features_count} features, "
+                    f"metadata specifies {len(expected_features)}."
+                )
+                return False
+
+            test_input = np.zeros((1, model_features_count))
             test_prediction = model.predict(test_input)
             if not isinstance(test_prediction, np.ndarray):
-                raise TypeError(f"Expected a numpy array, but got {type(test_prediction)}")
-            if test_prediction.shape[1] != 3:
-                logger.error(f"Invalid prediction shape: {test_prediction.shape}")
+                logger.error(f"ModelValidationFailed: Expected ndarray prediction output, got {type(test_prediction)}.")
                 return False
+            if test_prediction.shape[1] != 3:
+                logger.error(
+                    f"ModelValidationFailed: Invalid prediction output shape. Expected (1, 3), got {test_prediction.shape}."
+                )
+                return False
+
+            logger.info("Model validation successful.")
             return True
         except Exception as e:
-            logger.error(f"Model validation error: {e}")
+            logger.error(f"ModelValidationFailed: Unexpected error during model validation: {e}", exc_info=True)
             return False
 
     async def _validate_features(self, feature_vector: dict[str, float], metadata: dict[str, Any]) -> dict[str, Any]:
         """
         Comprehensive feature validation.
         """
-        if self.predictor_config is None:
-            raise ValueError("Predictor configuration is required")
+        logger.debug("Validating input feature vector.")
+        if not self.predictor_config:
+            logger.critical("FeatureValidationFailed: Predictor configuration is missing. Cannot validate features.")
+            raise ValueError("Predictor configuration is required for feature validation.")
+
         expected_features = set(metadata["features"]["names"])
         provided_features = set(feature_vector.keys())
         errors, warnings = [], []
@@ -310,22 +351,35 @@ class ModelPredictor:
         missing = expected_features - provided_features
         if missing:
             errors.append(f"Missing features: {missing}")
+            logger.error(f"FeatureValidationFailed: Missing features {missing}.")
 
         extra = provided_features - expected_features
         if extra:
             warnings.append(f"Extra features (will be ignored): {extra}")
+            logger.warning(f"FeatureValidationWarning: Extra features {extra} will be ignored.")
 
         for feature, value in feature_vector.items():
             if feature not in expected_features:
                 continue
             if pd.isna(value) or np.isinf(value):
                 errors.append(f"Invalid value for {feature}: {value}")
-            if hasattr(self.predictor_config, "feature_ranges"):
+                logger.error(f"FeatureValidationFailed: Invalid value for {feature}: {value}.")
+
+            if hasattr(self.predictor_config, "feature_ranges") and self.predictor_config.feature_ranges:
                 ranges = self.predictor_config.feature_ranges
-                if ranges is not None and feature in ranges:
+                if feature in ranges:
                     min_val, max_val = ranges[feature]
                     if not (min_val <= value <= max_val):
                         warnings.append(f"Feature {feature} out of expected range [{min_val}, {max_val}]: {value}")
+                        logger.warning(f"FeatureValidationWarning: {feature} out of expected range.")
+
+        if errors:
+            logger.error("FeatureValidationFailed: Feature validation failed with errors.")
+        elif warnings:
+            logger.warning("FeatureValidationWarning: Feature validation completed with warnings.")
+        else:
+            logger.debug("Feature validation successful.")
+
         return {"valid": len(errors) == 0, "errors": errors, "warnings": warnings}
 
     def _prepare_features(
@@ -334,25 +388,37 @@ class ModelPredictor:
         """
         Prepares features for prediction with proper ordering and scaling.
         """
-        feature_data = {feature: feature_vector.get(feature, 0.0) for feature in expected_features}
-        df = pd.DataFrame([feature_data])
-        scaled_values = scaler.transform(df)
-        return pd.DataFrame(scaled_values, columns=df.columns)
+        logger.debug("Preparing features for prediction.")
+        try:
+            feature_data = {feature: feature_vector.get(feature, 0.0) for feature in expected_features}
+            df = pd.DataFrame([feature_data])
+            scaled_values = scaler.transform(df)
+            prepared_df = pd.DataFrame(scaled_values, columns=df.columns)
+            logger.debug(f"Features prepared. Shape: {prepared_df.shape}.")
+            return prepared_df
+        except Exception as e:
+            logger.error(f"Error preparing features for prediction: {e}", exc_info=True)
+            raise RuntimeError("Failed to prepare features for prediction.") from e
 
     async def _check_feature_drift(
         self, model_key: str, features_df: pd.DataFrame, feature_stats: dict[str, Any]
     ) -> bool:
         """
         Monitors for feature drift using z-score against training data statistics.
-        Enhanced with comprehensive monitoring.
         """
-        if self.predictor_config is None:
-            raise ValueError("Predictor configuration is required")
+        logger.debug(f"Checking feature drift for {model_key}.")
+        if not self.predictor_config:
+            logger.critical("FeatureDriftCheckFailed: Predictor configuration is missing. Cannot check feature drift.")
+            raise ValueError("Predictor configuration is required for feature drift check.")
+
         drift_detected = False
         instrument_id, timeframe = model_key.split("_", 1)
 
         for feature in features_df.columns:
             if feature not in feature_stats:
+                logger.warning(
+                    f"Feature '{feature}' not found in training feature statistics for {model_key}. Skipping drift check."
+                )
                 continue
 
             stats = feature_stats[feature]
@@ -361,26 +427,36 @@ class ModelPredictor:
 
             if std > 1e-8:  # Avoid division by zero
                 z_score = abs((value - mean) / std)
-
-                # Record z-score to monitoring system
                 severity = "critical" if z_score > self.predictor_config.drift_threshold_z_score else "info"
                 metrics_registry.record_feature_drift(instrument_id, timeframe, feature, z_score, severity)
 
                 if z_score > self.predictor_config.drift_threshold_z_score:
                     logger.warning(
                         f"Feature drift detected for {feature} in {model_key}: "
-                        f"z-score={z_score:.2f} (value={value:.4f}, train_mean={mean:.4f}, train_std={std:.4f})"
+                        f"z-score={z_score:.2f} (value={value:.4f}, train_mean={mean:.4f}, train_std={std:.4f})."
                     )
                     drift_detected = True
+            else:
+                logger.debug(f"Standard deviation for feature '{feature}' is zero. Skipping Z-score calculation.")
 
+        if drift_detected:
+            logger.warning(f"Feature drift detected for {model_key}.")
+        else:
+            logger.debug(f"No significant feature drift detected for {model_key}.")
         return drift_detected
 
     def _process_prediction(
-        self, raw_prediction: np.ndarray, instrument_id: int, timeframe: str, version_id: str, start_time: float
+        self,
+        raw_prediction: NDArray[np.float64],
+        instrument_id: int,
+        timeframe: str,
+        version_id: str,
+        start_time: float,
     ) -> PredictionResult:
         """
         Processes raw model output into structured prediction.
         """
+        logger.debug(f"Processing raw prediction for {instrument_id} ({timeframe}).")
         probabilities = raw_prediction[0]
         predicted_class = int(np.argmax(probabilities)) - 1
         sorted_probs = np.sort(probabilities)[::-1]
@@ -388,6 +464,9 @@ class ModelPredictor:
 
         if confidence < self.predictor_config.confidence_threshold:
             predicted_class = 0
+            logger.debug(
+                f"Prediction for {instrument_id} ({timeframe}) set to NEUTRAL due to low confidence ({confidence:.2f})."
+            )
 
         inference_time = (time.time() - start_time) * 1000
         return PredictionResult(
@@ -401,6 +480,7 @@ class ModelPredictor:
                 "neutral": float(probabilities[1]),
                 "buy": float(probabilities[2]),
             },
+            feature_contributions=None,  # Calculated only if return_diagnostics is True
             model_version=version_id,
             inference_time_ms=inference_time,
             risk_assessment={},
@@ -412,9 +492,13 @@ class ModelPredictor:
         """
         Applies confidence calibration using isotonic regression or Platt scaling.
         """
+        logger.debug(f"Calibrating confidence for prediction {prediction.instrument_id} ({prediction.timeframe}).")
         if "scale" in calibration_params and "bias" in calibration_params:
             calibrated_confidence = prediction.confidence * calibration_params["scale"] + calibration_params["bias"]
             prediction.confidence = max(0, min(1, calibrated_confidence))
+            logger.debug(f"Confidence calibrated to {prediction.confidence:.2f}.")
+        else:
+            logger.warning("Calibration parameters incomplete. Skipping confidence calibration.")
         return prediction
 
     async def _assess_prediction_risk(
@@ -423,8 +507,13 @@ class ModelPredictor:
         """
         Comprehensive risk assessment for the prediction.
         """
-        if self.predictor_config is None:
-            raise ValueError("Predictor configuration is required")
+        logger.debug(f"Assessing prediction risk for {prediction.instrument_id} ({prediction.timeframe}).")
+        if not self.predictor_config:
+            logger.critical(
+                "PredictionRiskAssessmentFailed: Predictor configuration is missing. Cannot assess prediction risk."
+            )
+            raise ValueError("Predictor configuration is required for risk assessment.")
+
         risk_factors = {}
         entropy = -sum(p * np.log(p + 1e-10) for p in prediction.probabilities.values() if p > 0)
         risk_factors["model_uncertainty"] = entropy / np.log(3)
@@ -460,6 +549,7 @@ class ModelPredictor:
             risk_factors["signal_stability"] = 0.5
 
         risk_score = np.mean(list(risk_factors.values()))
+        logger.debug(f"Risk assessment completed. Risk score: {risk_score:.2f}.")
         return {
             "risk_score": risk_score,
             "risk_factors": risk_factors,
@@ -472,18 +562,25 @@ class ModelPredictor:
         """
         Calculates feature contributions using tree SHAP approximation.
         """
-        contributions = model.predict(features_df, pred_contrib=True)[0]
-        feature_names = features_df.columns.tolist()
-        feature_contributions = {feature: float(contributions[i]) for i, feature in enumerate(feature_names)}
-        total_contribution = sum(abs(c) for c in feature_contributions.values())
-        if total_contribution > 0:
-            feature_contributions = {k: v / total_contribution for k, v in feature_contributions.items()}
-        return dict(sorted(feature_contributions.items(), key=lambda x: abs(x[1]), reverse=True))
+        logger.debug("Calculating feature contributions.")
+        try:
+            contributions = model.predict(features_df, pred_contrib=True)[0]
+            feature_names = features_df.columns.tolist()
+            feature_contributions = {feature: float(contributions[i]) for i, feature in enumerate(feature_names)}
+            total_contribution = sum(abs(c) for c in feature_contributions.values())
+            if total_contribution > 0:
+                feature_contributions = {k: v / total_contribution for k, v in feature_contributions.items()}
+            logger.debug(f"Calculated contributions for {len(feature_contributions)} features.")
+            return dict(sorted(feature_contributions.items(), key=lambda x: abs(x[1]), reverse=True))
+        except Exception as e:
+            logger.error(f"Error calculating feature contributions: {e}", exc_info=True)
+            return {}
 
     async def get_model_status(self) -> dict[str, Any]:
         """
         Returns comprehensive status of all loaded models.
         """
+        logger.debug("Retrieving model status.")
         status: dict[str, Any] = {"active_models": {}, "prediction_statistics": {}}
         for model_key, version_id in self.active_models.items():
             model_info = self.models.get(f"{model_key}_{version_id}")
@@ -495,6 +592,8 @@ class ModelPredictor:
                     "error_count": model_info["error_count"],
                     "error_rate": (model_info["error_count"] / max(1, model_info["prediction_count"])),
                 }
+            else:
+                logger.warning(f"Active model {model_key} (version {version_id}) not found in loaded models.")
 
         if self.prediction_history:
             from collections import defaultdict
@@ -530,6 +629,7 @@ class ModelPredictor:
                         "neutral": stat["neutral"] / stat["total"],
                     }
             status["prediction_statistics"] = dict(stats)
+        logger.info("Model status retrieval completed.")
         return status
 
     async def reload_model(self, instrument_id: int, timeframe: str, model_path: Optional[Path] = None) -> bool:
@@ -537,12 +637,15 @@ class ModelPredictor:
         Reloads a model, useful for updating to newer versions.
         """
         model_key = f"{instrument_id}_{timeframe}"
+        logger.info(f"Attempting to reload model for {model_key}.")
+
         if model_path is None:
             latest_link = self.artifacts_path / f"latest_{instrument_id}_{timeframe}"
-            if not latest_link.exists():
-                logger.error(f"No latest model found for {model_key}")
+            if not latest_link.exists() or not latest_link.is_symlink():
+                logger.error(f"No latest model symlink found for {model_key} at {latest_link}. Cannot reload.")
                 return False
             model_path = latest_link.resolve()
+            logger.info(f"Resolved latest model path for {model_key} to {model_path}.")
 
         success = await self.load_model(model_path, instrument_id, timeframe, set_as_active=True)
         if success:
@@ -553,7 +656,10 @@ class ModelPredictor:
             ]
             for old_key in old_versions:
                 del self.models[old_key]
-                logger.info(f"Removed old model version: {old_key}")
+                logger.info(f"Removed old model version from memory: {old_key}.")
+            logger.info(f"Model {model_key} reloaded successfully.")
+        else:
+            logger.error(f"Failed to reload model for {model_key}.")
         return success
 
     async def _record_prediction_metrics(

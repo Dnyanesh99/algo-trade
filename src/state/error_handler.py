@@ -71,15 +71,24 @@ class CircuitBreaker:
         async with self._lock:
             if self._state == "CLOSED":
                 self._failure_count += 1
-                logger.debug(f"Circuit Breaker '{self.name}' recorded failure. Count: {self._failure_count}")
+                logger.debug(
+                    f"Circuit Breaker '{self.name}' recorded failure. Current failure count: {self._failure_count}"
+                )
             elif self._state == "HALF_OPEN":
                 # If a failure occurs in HALF_OPEN, immediately go back to OPEN
                 self._state = "OPEN"
                 self._last_failure_time = time.monotonic()
                 self._failure_count = 1  # Reset failure count for next OPEN state
-                logger.warning(f"Circuit Breaker '{self.name}' failed in HALF_OPEN, returning to OPEN state.")
+                logger.error(
+                    f"Circuit Breaker '{self.name}' failed during HALF_OPEN test. Transitioning back to OPEN state."
+                )
                 if self.on_trip:
                     await self.on_trip(self.name)
+            # Log failure in OPEN state as well, if it happens (shouldn't trigger state change)
+            elif self._state == "OPEN":
+                logger.debug(
+                    f"Circuit Breaker '{self.name}' is already OPEN. Recorded another failure, but no state change."
+                )
             await self._check_and_transition()
 
     async def record_success(self) -> None:
@@ -169,11 +178,13 @@ class ErrorHandler:
             level="INFO", component=breaker_name, message=f"Circuit Breaker for '{breaker_name}' has RESET.", details={}
         )
 
-    async def handle_error(self, component_name: str, message: str, details: dict[str, Any]) -> None:
+    async def handle_error(
+        self, component_name: str, message: str, details: dict[str, Any], exc_info: bool = False
+    ) -> None:
         """
         Centralized method to handle errors, log them, and update system state.
         """
-        logger.error(f"Error in {component_name}: {message}. Details: {details}")
+        logger.error(f"Error in {component_name}: {message}. Details: {details}", exc_info=exc_info)
         metrics_registry.increment_counter(
             "error_recovery_attempts_total", {"component": component_name, "error_type": "handled_error"}
         )
@@ -200,6 +211,7 @@ class ErrorHandler:
         """
         breaker = self.get_breaker(component_name)
         if not await breaker.allow_request():
+            logger.warning(f"Operation for {component_name} blocked because circuit breaker is OPEN.")
             raise CircuitBreakerOpenError(f"Operation for {component_name} blocked by circuit breaker.")
 
         try:
@@ -208,5 +220,7 @@ class ErrorHandler:
             return result
         except Exception as e:
             await breaker.record_failure()
-            logger.error(f"Operation for {component_name} failed: {e}")
+            logger.error(
+                f"Operation '{operation.__name__}' for component '{component_name}' failed: {e}", exc_info=True
+            )
             raise

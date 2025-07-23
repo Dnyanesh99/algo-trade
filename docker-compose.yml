@@ -9,8 +9,8 @@ services:
       POSTGRES_USER: ${DB_USER}
       POSTGRES_PASSWORD: ${DB_PASSWORD}
       POSTGRES_INITDB_ARGS: "-A md5"
-      TS_TUNE_MEMORY: 2GB
-      TS_TUNE_NUM_CPUS: 2
+      TS_TUNE_MEMORY: 4GB
+      TS_TUNE_NUM_CPUS: 4
     volumes:
       - timescaledb_data:/var/lib/postgresql/data
       
@@ -29,10 +29,11 @@ services:
       -p 5434
       -c shared_preload_libraries=timescaledb
       -c max_connections=100
-      -c shared_buffers=128MB
-      -c effective_cache_size=512MB
-      -c work_mem=2MB
-      -c maintenance_work_mem=32MB
+      -c shared_buffers=1GB
+      -c effective_cache_size=3GB
+      -c work_mem=16MB
+      -c maintenance_work_mem=256MB
+      -c max_locks_per_transaction=256
       -c checkpoint_completion_target=0.9
       -c wal_buffers=8MB
       -c default_statistics_target=50
@@ -43,11 +44,11 @@ services:
     deploy:
       resources:
         limits:
-          memory: 1G
-          cpus: '1.0'
+          memory: 4G
+          cpus: '2.0'
         reservations:
-          memory: 512M
-          cpus: '0.5'
+          memory: 2G
+          cpus: '1.0'
 
   # Algo Trading Application
   
@@ -114,6 +115,12 @@ services:
         reservations:
           memory: 1G
           cpus: '0.5'
+    healthcheck:
+      test: ["CMD-SHELL", "pip install psutil && python -c 'import psutil; assert any(\"main.py\" in p.name() for p in psutil.process_iter()), \"main.py not found\"'"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
 
   # Prometheus for metrics collection
   prometheus:

@@ -1,8 +1,7 @@
 import asyncio
-import threading
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, time
 from enum import IntEnum
 from typing import Any, Optional
 
@@ -12,8 +11,10 @@ import psutil
 from numba import jit, prange
 from numpy.typing import NDArray
 
+from src.database.instrument_repo import InstrumentRepository
 from src.database.label_repo import LabelRepository
-from src.database.models import LabelData
+from src.database.label_stats_repo import LabelingStatsRepository
+from src.database.models import LabelData, LabelingStatsData
 from src.utils.config_loader import ConfigLoader
 from src.utils.logger import LOGGER as logger
 
@@ -45,16 +46,40 @@ class BarrierConfig:
     atr_smoothing: str
     epsilon: float
     use_dynamic_barriers: bool
+    use_dynamic_epsilon: bool
     volatility_lookback: int
-    atr_cache_size: int
     dynamic_barrier_tp_sensitivity: float
     dynamic_barrier_sl_sensitivity: float
     sample_weight_decay_factor: float
+    dynamic_epsilon: Any
+    path_dependent_timeout: Any
+
+    @classmethod
+    def from_config(cls, labeling_config: Any) -> "BarrierConfig":
+        """Create BarrierConfig from Pydantic LabelingConfig."""
+        return cls(
+            atr_period=labeling_config.atr_period,
+            tp_atr_multiplier=labeling_config.tp_atr_multiplier,
+            sl_atr_multiplier=labeling_config.sl_atr_multiplier,
+            max_holding_periods=labeling_config.max_holding_periods,
+            min_bars_required=labeling_config.min_bars_required,
+            atr_smoothing=labeling_config.atr_smoothing,
+            epsilon=labeling_config.epsilon,
+            use_dynamic_barriers=labeling_config.use_dynamic_barriers,
+            use_dynamic_epsilon=labeling_config.use_dynamic_epsilon,
+            volatility_lookback=labeling_config.volatility_lookback,
+            dynamic_barrier_tp_sensitivity=labeling_config.dynamic_barrier_tp_sensitivity,
+            dynamic_barrier_sl_sensitivity=labeling_config.dynamic_barrier_sl_sensitivity,
+            sample_weight_decay_factor=labeling_config.sample_weight_decay_factor,
+            dynamic_epsilon=labeling_config.dynamic_epsilon,
+            path_dependent_timeout=labeling_config.path_dependent_timeout,
+        )
 
 
 @dataclass
 class LabelingStats:
     symbol: str
+    timeframe: str
     total_bars: int
     labeled_bars: int
     label_distribution: dict[str, int]
@@ -65,160 +90,274 @@ class LabelingStats:
     data_quality_score: float
     sharpe_ratio: float
     win_rate: float
-    profit_factor: float  # ADD THIS
+    profit_factor: float
+
+
+@dataclass(frozen=True)
+class LabelingInputs:
+    high: NDArray[np.float64]
+    low: NDArray[np.float64]
+    open: NDArray[np.float64]
+    close: NDArray[np.float64]
+    entry_prices: NDArray[np.float64]
+    tp_prices: NDArray[np.float64]
+    sl_prices: NDArray[np.float64]
+    max_periods: int
+    epsilon_array: NDArray[np.float64]
+    path_dependent_timeout_config: Any
+
+
+@dataclass(frozen=True)
+class LabelingResult:
+    labels: NDArray[np.int8]
+    exit_bar_offsets: NDArray[np.int32]
+    exit_prices: NDArray[np.float64]
+    exit_reasons: NDArray[np.int8]
+    mfe: NDArray[np.float64]
+    mae: NDArray[np.float64]
 
 
 class OptimizedTripleBarrierLabeler:
     """
     Production-grade Triple Barrier Labeler with advanced features:
     - Dynamic barrier adjustment based on volatility regime
-    - Proper handling of overnight gaps
-    - Advanced exit logic for ambiguous cases
-    - Risk-reward ratio calculation
-    - Performance metrics tracking
+    - Path-dependent timeout labeling (De Prado, AFML)
+    - Lookahead bias correction for ATR calculation
+    - Configuration-driven parameters for market specifics
+    - Refactored for clarity, testability, and maintainability.
     """
-
-    _atr_cache: dict[str, np.ndarray] = {}
-    _cache_lock = threading.Lock()
 
     def __init__(
         self,
         barrier_config: BarrierConfig,
         label_repo: LabelRepository,
+        instrument_repo: InstrumentRepository,
+        stats_repo: LabelingStatsRepository,
+        allowed_timeframes: list[int],
         executor: Optional[ProcessPoolExecutor] = None,
     ):
+        if not isinstance(barrier_config, BarrierConfig):
+            raise TypeError("barrier_config must be a valid BarrierConfig instance.")
+        if not all(
+            isinstance(repo, (LabelRepository, InstrumentRepository, LabelingStatsRepository))
+            for repo in [label_repo, instrument_repo, stats_repo]
+        ):
+            raise TypeError("All repository arguments must be valid repository instances.")
+
         self.config = barrier_config
-        self.validate_config()  # Add this
+        self.allowed_timeframes = allowed_timeframes
+        self.validate_config()
         self.label_repo = label_repo
+        self.instrument_repo = instrument_repo
+        self.stats_repo = stats_repo
         self.label_stats: dict[str, LabelingStats] = {}
-        self.stats_lock = threading.Lock()
+        self.stats_lock = asyncio.Lock()
         self.executor = executor or ProcessPoolExecutor(max_workers=psutil.cpu_count(logical=False))
 
         logger.info(
             f"TripleBarrierLabeler initialized with config: "
             f"TP={self.config.tp_atr_multiplier}x ATR, "
             f"SL={self.config.sl_atr_multiplier}x ATR, "
-            f"Max holding={self.config.max_holding_periods} bars"
+            f"Max holding={self.config.max_holding_periods} bars, "
+            f"Allowed timeframes: {self.allowed_timeframes}"
         )
 
     def validate_config(self) -> None:
         """Validate barrier configuration for production use."""
+        logger.info("Validating barrier configuration...")
         if self.config.tp_atr_multiplier <= 0:
             raise ValueError("TP multiplier must be positive")
-
         if self.config.sl_atr_multiplier <= 0:
             raise ValueError("SL multiplier must be positive")
-
         if self.config.tp_atr_multiplier <= self.config.sl_atr_multiplier:
-            logger.warning(
-                f"TP multiplier ({self.config.tp_atr_multiplier}) <= "
-                f"SL multiplier ({self.config.sl_atr_multiplier}) - may result in poor risk/reward"
+            raise RuntimeError(
+                f"CRITICAL CONFIGURATION ERROR: TP multiplier ({self.config.tp_atr_multiplier}) <= SL multiplier ({self.config.sl_atr_multiplier}) - Invalid risk/reward ratio will compromise trading performance"
             )
-
         if self.config.max_holding_periods < 2:
             raise ValueError("Max holding periods must be at least 2")
-
         if self.config.atr_period < 2:
             raise ValueError("ATR period must be at least 2")
-
         if self.config.epsilon <= 0:
             raise ValueError("Epsilon must be positive")
-
         if self.config.volatility_lookback < 1:
             raise ValueError("Volatility lookback must be at least 1")
-
-        if self.config.atr_cache_size <= 0:
-            raise ValueError("ATR cache size must be positive")
-
         if not 0 < self.config.dynamic_barrier_tp_sensitivity < 1:
             raise ValueError("Dynamic barrier TP sensitivity must be between 0 and 1")
-
         if not 0 < self.config.dynamic_barrier_sl_sensitivity < 1:
             raise ValueError("Dynamic barrier SL sensitivity must be between 0 and 1")
-
         if not 0 <= self.config.sample_weight_decay_factor <= 1:
             raise ValueError("Sample weight decay factor must be between 0 and 1")
+        logger.info("Barrier configuration validated successfully.")
+
+    def _validate_timeframe(self, timeframe: str) -> None:
+        """Validate that the requested timeframe is allowed in configuration."""
+        logger.debug(f"Validating timeframe: {timeframe}")
+        import re
+
+        match = re.match(r"(\d+)min", timeframe.lower())
+        if not match:
+            raise ValueError(f"Invalid timeframe format: '{timeframe}'. Expected format like '15min'.")
+
+        timeframe_minutes = int(match.group(1))
+        if timeframe_minutes not in self.allowed_timeframes:
+            raise ValueError(
+                f"Timeframe '{timeframe}' ({timeframe_minutes} minutes) is not allowed. "
+                f"Configured labeling_timeframes: {self.allowed_timeframes}."
+            )
 
     @staticmethod
     @jit(nopython=True, cache=True, fastmath=True)  # type: ignore[misc]
     def _calculate_true_range(
         high: NDArray[np.float64], low: NDArray[np.float64], close: NDArray[np.float64]
     ) -> NDArray[np.float64]:
-        """Calculate True Range with proper handling of the first bar."""
         n = len(high)
         if n == 0:
             return np.zeros(0, dtype=np.float64)
-
         tr = np.empty(n, dtype=np.float64)
         tr[0] = high[0] - low[0]
-
         for i in range(1, n):
             hl = high[i] - low[i]
             hc = abs(high[i] - close[i - 1])
             lc = abs(low[i] - close[i - 1])
             tr[i] = max(hl, max(hc, lc))
-
         return tr
 
     @staticmethod
     @jit(nopython=True, cache=True, fastmath=True)  # type: ignore[misc]
     def _calculate_ema(values: NDArray[np.float64], period: int) -> NDArray[np.float64]:
-        """Exponential moving average calculation."""
         n = len(values)
         if n < period:
             return np.full(n, np.nan, dtype=np.float64)
-
         ema = np.empty(n, dtype=np.float64)
-        ema[: period - 1] = np.nan  # Fill initial NaNs if period > 1
-
-        # Initialize with SMA for the first 'period' values
+        ema[: period - 1] = np.nan
         ema[period - 1] = np.mean(values[:period])
-
         alpha = 2.0 / (period + 1)
         for i in range(period, n):
             ema[i] = alpha * values[i] + (1 - alpha) * ema[i - 1]
-
         return ema
 
-    def _calculate_atr(self, df: pd.DataFrame, symbol: str) -> NDArray[np.float64]:
-        """Calculate ATR with a symbol-specific cache for performance."""
-        # --- SUGGESTION IMPLEMENTED: More specific cache key ---
-        cache_key = f"{symbol}_{df.index[0]}_{df.index[-1]}_{len(df)}"
-
-        with self._cache_lock:
-            if cache_key in self._atr_cache:
-                return self._atr_cache[cache_key]
-
+    def _calculate_atr(self, df: pd.DataFrame) -> NDArray[np.float64]:
+        """Calculate ATR. Caching removed as it's ineffective across processes."""
+        logger.debug(
+            f"Calculating ATR with period {self.config.atr_period} and smoothing '{self.config.atr_smoothing}'."
+        )
         tr = self._calculate_true_range(df["high"].values, df["low"].values, df["close"].values)
-
         if self.config.atr_smoothing == "ema":
             atr = self._calculate_ema(tr, self.config.atr_period)
         else:
             atr = pd.Series(tr).rolling(window=self.config.atr_period).mean().values
 
-        first_valid_idx = (~np.isnan(atr)).argmax()
+        # Forward-fill initial NaN values
+        first_valid_idx = np.argmax(~np.isnan(atr))
         if first_valid_idx > 0:
-            atr[:first_valid_idx] = np.full(first_valid_idx, atr[first_valid_idx])
-
-        with self._cache_lock:
-            self._atr_cache[cache_key] = atr
-            if len(self._atr_cache) > self.config.atr_cache_size:
-                self._atr_cache.pop(next(iter(self._atr_cache)))
-
+            atr[:first_valid_idx] = atr[first_valid_idx]
         return atr
 
-    def _calculate_dynamic_barriers(self, df: pd.DataFrame, atr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """Calculate dynamic barriers based on volatility regime."""
+    def _calculate_dynamic_epsilon(self, df: pd.DataFrame, atr: NDArray[np.float64]) -> NDArray[np.float64]:
+        if not self.config.use_dynamic_epsilon:
+            return np.full(len(df), self.config.epsilon, dtype=np.float64)
+
+        logger.debug("Calculating dynamic epsilon...")
+        n = len(df)
+        if n < self.config.volatility_lookback:
+            logger.warning("Insufficient data for dynamic epsilon, returning default.")
+            return np.full(n, self.config.epsilon, dtype=np.float64)
+
+        cfg = self.config.dynamic_epsilon
+        atr_series = pd.Series(atr, index=df.index)
+        atr_rolling_mean = atr_series.rolling(window=self.config.volatility_lookback, min_periods=1).mean()
+
+        with np.errstate(divide="ignore", invalid="ignore"):
+            division_result = atr_series / atr_rolling_mean
+            atr_ratio = np.where(atr_rolling_mean > 0, division_result, 1.0)
+
+        regime_conditions = [
+            atr_ratio < cfg.low_volatility_threshold,
+            atr_ratio < cfg.high_volatility_threshold,
+            atr_ratio < cfg.extreme_volatility_threshold,
+        ]
+        regime_choices = [
+            cfg.low_volatility_multiplier,
+            cfg.normal_volatility_multiplier,
+            cfg.high_volatility_multiplier,
+        ]
+        regime_multipliers = np.select(regime_conditions, regime_choices, default=cfg.extreme_volatility_multiplier)
+
+        time_multipliers = np.ones(n, dtype=np.float64)
+        timestamps = self._extract_timestamps(df)
+        if timestamps is not None:
+            ist_timestamps = (
+                timestamps.tz_convert("Asia/Kolkata")
+                if timestamps.tz
+                else timestamps.tz_localize("UTC").tz_convert("Asia/Kolkata")
+            )
+
+            hours = ist_timestamps.hour.values
+            minutes = ist_timestamps.minute.values
+            day_of_week = ist_timestamps.dayofweek.values
+
+            session_cfg = cfg.market_session_times
+            for session in ["opening", "pre_lunch", "closing"]:
+                start_time = time.fromisoformat(session_cfg[session]["start"])
+                end_time = time.fromisoformat(session_cfg[session]["end"])
+                mask = (hours > start_time.hour) | ((hours == start_time.hour) & (minutes >= start_time.minute))
+                mask &= (hours < end_time.hour) | ((hours == end_time.hour) & (minutes <= end_time.minute))
+                time_multipliers = np.where(mask, cfg[f"{session}_multiplier"], time_multipliers)
+
+            time_multipliers = np.where(day_of_week == 0, time_multipliers * cfg.monday_multiplier, time_multipliers)
+            weekly_expiry_mask = day_of_week == cfg.weekly_expiry_day
+            time_multipliers = np.where(weekly_expiry_mask, time_multipliers * cfg.friday_multiplier, time_multipliers)
+
+            monthly_expiry_mask = self._detect_monthly_expiry(ist_timestamps, cfg.weekly_expiry_day)
+            time_multipliers = np.where(
+                monthly_expiry_mask, time_multipliers * cfg.expiry_volatility_multiplier, time_multipliers
+            )
+
+        atr_rolling_std = atr_series.rolling(window=self.config.volatility_lookback, min_periods=1).std().fillna(0)
+        volatility_zscore = (atr_series - atr_rolling_mean) / (atr_rolling_std + 1e-10)
+        abs_zscore = np.abs(volatility_zscore)
+        zscore_conditions = [
+            abs_zscore > cfg.extreme_zscore_threshold,
+            abs_zscore > cfg.moderate_zscore_threshold,
+            abs_zscore < cfg.stable_zscore_threshold,
+        ]
+        zscore_choices = [cfg.extreme_zscore_multiplier, cfg.moderate_zscore_multiplier, cfg.stable_zscore_multiplier]
+        zscore_multipliers = np.select(zscore_conditions, zscore_choices, default=1.0)
+
+        final_multipliers = regime_multipliers * time_multipliers * zscore_multipliers
+        final_multipliers = np.clip(final_multipliers, cfg.min_epsilon_multiplier, cfg.max_epsilon_multiplier)
+        return self.config.epsilon * final_multipliers
+
+    def _extract_timestamps(self, df: pd.DataFrame) -> pd.DatetimeIndex:
+        for col in ["timestamp", "ts"]:
+            if col in df.columns:
+                ts = pd.to_datetime(df[col])
+                return pd.DatetimeIndex(ts)
+        if isinstance(df.index, pd.DatetimeIndex):
+            return df.index
+        raise ValueError("No timestamp information found in DataFrame")
+
+    def _detect_monthly_expiry(self, timestamps: pd.DatetimeIndex, weekly_expiry_day: int) -> NDArray[np.bool_]:
+        if timestamps is None or len(timestamps) == 0:
+            return np.zeros(0, dtype=bool)
+        df = pd.DataFrame({"timestamp": timestamps})
+        df["month_str"] = df["timestamp"].dt.strftime("%Y-%m")
+        df["is_expiry_day"] = df["timestamp"].dt.dayofweek == weekly_expiry_day
+        last_expiry_day_of_month = df[df["is_expiry_day"]].groupby("month_str")["timestamp"].transform("max")
+        return (df["timestamp"] == last_expiry_day_of_month).values
+
+    def _calculate_dynamic_barriers(
+        self, df: pd.DataFrame, atr: NDArray[np.float64]
+    ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
         if not self.config.use_dynamic_barriers:
-            tp_multiplier = np.full(len(df), self.config.tp_atr_multiplier)
-            sl_multiplier = np.full(len(df), self.config.sl_atr_multiplier)
-            return tp_multiplier, sl_multiplier
+            return (np.full(len(df), self.config.tp_atr_multiplier), np.full(len(df), self.config.sl_atr_multiplier))
 
-        volatility_rolling = pd.Series(atr).rolling(window=self.config.volatility_lookback, min_periods=1)
-        vol_mean = volatility_rolling.mean()
-        vol_std = volatility_rolling.std()
-
-        vol_zscore = (atr - vol_mean) / (vol_std + 1e-10)
+        logger.debug("Calculating dynamic barriers...")
+        valid_atr = np.where(np.isnan(atr), np.nanmedian(atr), atr)
+        atr_series = pd.Series(valid_atr, index=df.index)
+        vol_mean = atr_series.rolling(window=self.config.volatility_lookback, min_periods=1).mean()
+        vol_std = atr_series.rolling(window=self.config.volatility_lookback, min_periods=1).std().fillna(0)
+        vol_zscore = (atr_series - vol_mean) / (vol_std + 1e-10)
 
         tp_multiplier = self.config.tp_atr_multiplier * (
             1 + self.config.dynamic_barrier_tp_sensitivity * np.tanh(vol_zscore)
@@ -226,7 +365,6 @@ class OptimizedTripleBarrierLabeler:
         sl_multiplier = self.config.sl_atr_multiplier * (
             1 + self.config.dynamic_barrier_sl_sensitivity * np.tanh(vol_zscore)
         )
-
         return tp_multiplier.values, sl_multiplier.values
 
     @staticmethod
@@ -240,7 +378,10 @@ class OptimizedTripleBarrierLabeler:
         tp_prices: NDArray[np.float64],
         sl_prices: NDArray[np.float64],
         max_periods: int,
-        epsilon: float,
+        epsilon_array: NDArray[np.float64],
+        path_dependent_timeout_enabled: bool,
+        timeout_upper_thresh: float,
+        timeout_lower_thresh: float,
     ) -> tuple[
         NDArray[np.int8],
         NDArray[np.int32],
@@ -249,29 +390,6 @@ class OptimizedTripleBarrierLabeler:
         NDArray[np.float64],
         NDArray[np.float64],
     ]:
-        """
-        Core engine for checking triple barriers in parallel.
-
-        Args:
-            high: Array of high prices
-            low: Array of low prices
-            open_: Array of open prices
-            close: Array of close prices
-            entry_prices: Price at which position is initiated (next bar's open)
-            tp_prices: Upper barrier (take-profit)
-            sl_prices: Lower barrier (stop-loss)
-            max_periods: Maximum number of bars to hold position
-            epsilon: Threshold for determining non-neutral return at timeout
-
-        Returns:
-            Tuple containing:
-            - labels: -1 (SELL), 0 (NEUTRAL), 1 (BUY)
-            - exit_bar_offsets: Number of bars held
-            - exit_prices: Price at which position was exited
-            - exit_reasons: Enum value from ExitReason
-            - mfe: Max Favorable Excursion as percentage
-            - mae: Max Adverse Excursion as percentage
-        """
         n = len(entry_prices)
         labels = np.zeros(n, dtype=np.int8)
         exit_bar_offsets = np.zeros(n, dtype=np.int32)
@@ -281,74 +399,66 @@ class OptimizedTripleBarrierLabeler:
         mae = np.zeros(n, dtype=np.float64)
 
         for i in prange(n):
-            if np.isnan(tp_prices[i]) or np.isnan(sl_prices[i]):
+            if np.isnan(tp_prices[i]) or np.isnan(sl_prices[i]) or np.isnan(entry_prices[i]) or entry_prices[i] <= 0:
                 continue
-
-            # CRITICAL: Cannot label if we don't have future data
-            if i + 1 >= n:
+            if i + max_periods >= n:
                 continue
 
             exit_reasons[i] = ExitReason.TIME_OUT
-
-            # Start from j=1 (next bar after entry)
-            for j in range(1, min(max_periods + 1, n - i)):
+            for j in range(1, max_periods + 1):
                 bar_idx = i + j
+                if bar_idx >= n:
+                    break
 
-                # Calculate returns from entry price
                 high_return = (high[bar_idx] - entry_prices[i]) / entry_prices[i]
                 low_return = (low[bar_idx] - entry_prices[i]) / entry_prices[i]
-
-                # Track MFE/MAE
                 mfe[i] = max(mfe[i], high_return)
                 mae[i] = min(mae[i], low_return)
 
-                # Check barrier hits
                 tp_hit = high[bar_idx] >= tp_prices[i]
                 sl_hit = low[bar_idx] <= sl_prices[i]
 
                 if tp_hit and sl_hit:
-                    # Both barriers hit - determine which was likely hit first
                     open_to_tp = abs(open_[bar_idx] - tp_prices[i])
                     open_to_sl = abs(open_[bar_idx] - sl_prices[i])
-
                     if open_to_tp < open_to_sl:
-                        labels[i] = Label.BUY
-                        exit_reasons[i] = ExitReason.TP_HIT
-                        exit_prices[i] = tp_prices[i]
+                        labels[i], exit_reasons[i], exit_prices[i] = Label.BUY, ExitReason.TP_HIT, tp_prices[i]
                     else:
-                        labels[i] = Label.SELL
-                        exit_reasons[i] = ExitReason.SL_HIT
-                        exit_prices[i] = sl_prices[i]
-
+                        labels[i], exit_reasons[i], exit_prices[i] = Label.SELL, ExitReason.SL_HIT, sl_prices[i]
                     exit_bar_offsets[i] = j
                     break
                 if tp_hit:
-                    labels[i] = Label.BUY
-                    exit_reasons[i] = ExitReason.TP_HIT
-                    exit_prices[i] = tp_prices[i]
+                    labels[i], exit_reasons[i], exit_prices[i] = Label.BUY, ExitReason.TP_HIT, tp_prices[i]
                     exit_bar_offsets[i] = j
                     break
                 if sl_hit:
-                    labels[i] = Label.SELL
-                    exit_reasons[i] = ExitReason.SL_HIT
-                    exit_prices[i] = sl_prices[i]
+                    labels[i], exit_reasons[i], exit_prices[i] = Label.SELL, ExitReason.SL_HIT, sl_prices[i]
                     exit_bar_offsets[i] = j
                     break
 
-            # Handle timeout
             if exit_reasons[i] == ExitReason.TIME_OUT:
                 exit_idx = min(i + max_periods, n - 1)
                 exit_prices[i] = close[exit_idx]
                 exit_bar_offsets[i] = exit_idx - i
+                final_return = (exit_prices[i] - entry_prices[i]) / entry_prices[i]
 
-                final_return = (exit_prices[i] - entry_prices[i]) / (entry_prices[i] + epsilon)
-
-                if final_return > epsilon:
-                    labels[i] = Label.BUY
-                elif final_return < -epsilon:
-                    labels[i] = Label.SELL
+                if path_dependent_timeout_enabled:
+                    total_range = mfe[i] - mae[i]
+                    path_adjusted_return = ((final_return - mae[i]) / total_range * 2 - 1) if total_range > 1e-9 else 0
+                    if path_adjusted_return > timeout_upper_thresh:
+                        labels[i] = Label.BUY
+                    elif path_adjusted_return < timeout_lower_thresh:
+                        labels[i] = Label.SELL
+                    else:
+                        labels[i] = Label.NEUTRAL
                 else:
-                    labels[i] = Label.NEUTRAL
+                    current_epsilon = epsilon_array[i]
+                    if final_return > current_epsilon:
+                        labels[i] = Label.BUY
+                    elif final_return < -current_epsilon:
+                        labels[i] = Label.SELL
+                    else:
+                        labels[i] = Label.NEUTRAL
 
         return labels, exit_bar_offsets, exit_prices, exit_reasons, mfe, mae
 
@@ -356,56 +466,36 @@ class OptimizedTripleBarrierLabeler:
         self,
         instrument_id: int,
         df: pd.DataFrame,
-        results: tuple,
-        entry_prices: np.ndarray,
-        tp_prices: np.ndarray,
-        sl_prices: np.ndarray,
-        tp_multipliers: np.ndarray,
-        sl_multipliers: np.ndarray,
+        results: LabelingResult,
+        entry_prices: NDArray[np.float64],
+        tp_prices: NDArray[np.float64],
+        sl_prices: NDArray[np.float64],
+        tp_multipliers: NDArray[np.float64],
+        sl_multipliers: NDArray[np.float64],
         timeframe: str,
     ) -> pd.DataFrame:
-        """Prepare labels DataFrame with all required fields."""
-        labels, exit_offsets, exit_prices, exit_reasons, mfe, mae = results
-
-        barrier_returns = (exit_prices - entry_prices) / (entry_prices + self.config.epsilon)
-        potential_profit = tp_prices - entry_prices
-        potential_loss = entry_prices - sl_prices
-        risk_reward_ratio = potential_profit / (potential_loss + 1e-10)
-
-        # Ensure we have a timestamp column
-        timestamp_col = None
-        if "timestamp" in df.columns:
-            timestamp_col = df["timestamp"]
-        elif "ts" in df.columns:
-            timestamp_col = df["ts"]
-        elif df.index.name == "timestamp" or isinstance(df.index, pd.DatetimeIndex):
-            timestamp_col = df.index
-        else:
-            # If no timestamp column found, use the index
-            timestamp_col = df.index
-
-        # Ensure timestamp_col is a pandas Series or Index with proper length
-        if not isinstance(timestamp_col, (pd.Series, pd.Index)):
-            timestamp_col = pd.Series(timestamp_col, index=df.index)
-        elif len(timestamp_col) != len(df):
-            # If lengths don't match, use the index
-            timestamp_col = df.index
+        logger.debug("Preparing final labeled DataFrame...")
+        with np.errstate(divide="ignore", invalid="ignore"):
+            barrier_returns = (results.exit_prices - entry_prices) / entry_prices
+            potential_profit = tp_prices - entry_prices
+            potential_loss = entry_prices - sl_prices
+            risk_reward_ratio = potential_profit / (potential_loss + 1e-10)
 
         result_df = pd.DataFrame(
             {
-                "ts": timestamp_col,
+                "ts": self._extract_timestamps(df),
                 "timeframe": timeframe,
                 "instrument_id": instrument_id,
-                "label": labels,
-                "exit_reason": [ExitReason(r).name for r in exit_reasons],
-                "exit_bar_offset": exit_offsets,
+                "label": results.labels,
+                "exit_reason": [ExitReason(r).name for r in results.exit_reasons],
+                "exit_bar_offset": results.exit_bar_offsets,
                 "entry_price": entry_prices,
-                "exit_price": exit_prices,
+                "exit_price": results.exit_prices,
                 "tp_price": tp_prices,
                 "sl_price": sl_prices,
                 "barrier_return": barrier_returns,
-                "max_favorable_excursion": mfe,
-                "max_adverse_excursion": mae,
+                "max_favorable_excursion": results.mfe,
+                "max_adverse_excursion": results.mae,
                 "risk_reward_ratio": risk_reward_ratio,
                 "volatility_at_entry": df["atr"].values,
                 "tp_multiplier": tp_multipliers,
@@ -417,189 +507,225 @@ class OptimizedTripleBarrierLabeler:
             ~pd.isna(result_df["entry_price"])
         )
         result_df = result_df[valid_mask].copy()
-        result_df["return_per_bar"] = result_df["barrier_return"] / result_df["exit_bar_offset"]
-        result_df["efficiency"] = result_df["barrier_return"] / (result_df["max_favorable_excursion"] + 1e-10)
 
+        with np.errstate(divide="ignore", invalid="ignore"):
+            result_df["return_per_bar"] = result_df["barrier_return"] / result_df["exit_bar_offset"].replace(0, 1)
+            result_df["efficiency"] = result_df["barrier_return"] / (result_df["max_favorable_excursion"] + 1e-10)
+
+        logger.info(f"Prepared {len(result_df)} valid labeled records.")
         return result_df
+
+    async def _validate_and_prepare_data(
+        self, df: pd.DataFrame, symbol: str, instrument_id: int
+    ) -> tuple[bool, Optional[pd.DataFrame]]:
+        logger.debug(f"Validating and preparing data for {symbol} (ID: {instrument_id}).")
+        instrument = await self.instrument_repo.get_instrument_by_id(instrument_id)
+        segment = (instrument.segment or "") if instrument else ""
+        is_index = segment in config.broker.segment_types and config.broker.segment_types[0] in segment
+
+        required_columns = {"open", "high", "low", "close", "timestamp"}
+        if not required_columns.issubset(df.columns):
+            raise RuntimeError(f"Missing required columns for {symbol}: {required_columns - set(df.columns)}")
+
+        essential_cols = (
+            ["open", "high", "low", "close", "timestamp"]
+            if is_index
+            else ["open", "high", "low", "close", "volume", "timestamp"]
+        )
+        df_essential = df[essential_cols].dropna()
+
+        if len(df_essential) < self.config.min_bars_required:
+            raise RuntimeError(
+                f"Insufficient non-NaN data for {symbol}: {len(df_essential)} < {self.config.min_bars_required}."
+            )
+
+        price_cols = ["open", "high", "low", "close"]
+        if not np.isfinite(df[price_cols].values).all() or (df[price_cols] <= 0).any().any():
+            raise RuntimeError(f"Non-finite or non-positive prices found for {symbol}.")
+
+        df_sorted = df.sort_values("timestamp").reset_index(drop=True)
+        if df_sorted["timestamp"].duplicated().any():
+            logger.warning(f"Duplicate timestamps found for {symbol}. Dropping duplicates.")
+            df_sorted = df_sorted.drop_duplicates(subset=["timestamp"], keep="first")
+
+        logger.info(f"Data validation and preparation successful for {symbol}.")
+        return True, df_sorted
+
+    def _prepare_labeling_inputs(
+        self, df: pd.DataFrame
+    ) -> tuple[LabelingInputs, NDArray[np.float64], NDArray[np.float64]]:
+        logger.debug("Preparing inputs for barrier labeling...")
+        df["atr"] = self._calculate_atr(df)
+        entry_prices = df["open"].shift(-1).values
+
+        # CRITICAL FIX: Prevent lookahead bias by using ATR from the previous bar.
+        atr_at_entry = df["atr"].shift(1).values
+
+        tp_multipliers, sl_multipliers = self._calculate_dynamic_barriers(df, atr_at_entry)
+        tp_prices = entry_prices + tp_multipliers * atr_at_entry
+        sl_prices = entry_prices - sl_multipliers * atr_at_entry
+
+        dynamic_epsilon_array = self._calculate_dynamic_epsilon(df, atr_at_entry)
+        epsilon_array = np.nan_to_num(dynamic_epsilon_array, nan=self.config.epsilon)
+
+        # Invalidate last entry to prevent out-of-bounds access
+        entry_prices[-1] = np.nan
+        tp_prices[-1] = np.nan
+        sl_prices[-1] = np.nan
+
+        timeout_cfg = self.config.path_dependent_timeout
+        inputs = LabelingInputs(
+            high=df["high"].values,
+            low=df["low"].values,
+            open=df["open"].values,
+            close=df["close"].values,
+            entry_prices=entry_prices,
+            tp_prices=tp_prices,
+            sl_prices=sl_prices,
+            max_periods=self.config.max_holding_periods,
+            epsilon_array=epsilon_array,
+            path_dependent_timeout_config={
+                "enabled": timeout_cfg.enabled,
+                "upper_thresh": timeout_cfg.upper_threshold,
+                "lower_thresh": timeout_cfg.lower_threshold,
+            },
+        )
+        logger.debug("Labeling inputs prepared successfully.")
+        return inputs, tp_multipliers, sl_multipliers
+
+    async def _run_barrier_check(self, inputs: LabelingInputs) -> LabelingResult:
+        logger.debug("Running optimized barrier check in parallel...")
+        loop = asyncio.get_running_loop()
+        path_cfg = inputs.path_dependent_timeout_config
+
+        results_tuple = await loop.run_in_executor(
+            self.executor,
+            self._check_barriers_optimized,
+            inputs.high,
+            inputs.low,
+            inputs.open,
+            inputs.close,
+            inputs.entry_prices,
+            inputs.tp_prices,
+            inputs.sl_prices,
+            inputs.max_periods,
+            inputs.epsilon_array,
+            path_cfg["enabled"],
+            path_cfg["upper_thresh"],
+            path_cfg["lower_thresh"],
+        )
+        logger.debug("Optimized barrier check completed.")
+        return LabelingResult(*results_tuple)
+
+    async def _calculate_and_store_results(
+        self, symbol: str, timeframe: str, original_df: pd.DataFrame, labeled_df: pd.DataFrame, start_time: datetime
+    ) -> LabelingStats:
+        logger.debug(f"Calculating and storing results for {symbol} ({timeframe}).")
+        stats = self._calculate_statistics(symbol, original_df, labeled_df, start_time, timeframe)
+
+        if not labeled_df.empty:
+            labels_to_insert = [LabelData(**row) for row in labeled_df.to_dict("records")]
+            await self.label_repo.insert_labels(labeled_df.iloc[0]["instrument_id"], labels_to_insert)
+            logger.info(f"Stored {len(labels_to_insert)} labels for {symbol} in {stats.processing_time_ms:.2f}ms.")
+
+            stats_data = LabelingStatsData(**stats.__dict__)
+            await self.stats_repo.insert_stats(stats_data)
+            logger.info(f"Stored labeling statistics for {symbol}.")
+
+        async with self.stats_lock:
+            self.label_stats[symbol] = stats
+        return stats
 
     async def process_symbol(
         self, instrument_id: int, symbol: str, df: pd.DataFrame, timeframe: str = "15min"
     ) -> Optional[LabelingStats]:
-        """Process a symbol with production safeguards."""
-        start_time = datetime.now()
-        loop = asyncio.get_running_loop()
-
+        logger.info(f"Processing {symbol} (ID: {instrument_id}) with {len(df):,} bars for timeframe {timeframe}.")
         try:
-            logger.info(f"Processing {symbol} (ID: {instrument_id}) with {len(df):,} bars")
+            self._validate_timeframe(timeframe)
+        except ValueError as e:
+            logger.error(f"Cannot process {symbol}: {e}", exc_info=True)
+            return None
 
-            # DATA VALIDATION FIRST
-            required_cols = {"open", "high", "low", "close"}
-            missing_cols = required_cols - set(df.columns)
-            if missing_cols:
-                logger.error(f"Missing required columns for {symbol}: {missing_cols}")
+        start_time = datetime.now()
+        try:
+            is_valid, df_sorted = await self._validate_and_prepare_data(df, symbol, instrument_id)
+            if not is_valid or df_sorted is None:
+                logger.error(f"Data validation failed for {symbol}, cannot proceed with labeling.")
                 return None
 
-            # Data quality checks
-            if (df["high"] < df["low"]).any():
-                logger.error(f"Data quality issue for {symbol}: high < low")
-                return None
-
-            if df["close"].isna().sum() > len(df) * 0.01:
-                logger.error(f"Too many missing values for {symbol}: {df['close'].isna().sum()}")
-                return None
-
-            # Check for zero or negative prices
-            price_cols = ["open", "high", "low", "close"]
-            if (df[price_cols] <= 0).any().any():
-                logger.error(f"Invalid prices (<=0) found for {symbol}")
-                return None
-
-            # STANDARDIZE TIMESTAMP EARLY
-            if df.index.name == "timestamp" or isinstance(df.index, pd.DatetimeIndex):
-                df = df.reset_index()
-
-            if "timestamp" not in df.columns:
-                if "ts" in df.columns:
-                    df["timestamp"] = pd.to_datetime(df["ts"])
-                elif "time" in df.columns:
-                    df["timestamp"] = pd.to_datetime(df["time"])
-                elif "date" in df.columns:
-                    df["timestamp"] = pd.to_datetime(df["date"])
-                else:
-                    logger.error(f"No timestamp column found for {symbol}")
-                    return None
-            else:
-                df["timestamp"] = pd.to_datetime(df["timestamp"])
-
-            # Check for sufficient data
-            if len(df) < self.config.min_bars_required:
-                logger.warning(f"Insufficient data for {symbol}: {len(df)} < {self.config.min_bars_required}")
-                return None
-
-            # Sort by timestamp and reset index
-            df_sorted = df.sort_values("timestamp").reset_index(drop=True)
-
-            # Remove any duplicate timestamps
-            if df_sorted["timestamp"].duplicated().any():
-                logger.warning(f"Duplicate timestamps found for {symbol}, keeping first occurrence")
-                df_sorted = df_sorted.drop_duplicates(subset=["timestamp"], keep="first")
-
-            # Continue with processing...
-            df_sorted["atr"] = self._calculate_atr(df_sorted, symbol)
-
-            # Use open of next bar as entry price to avoid look-ahead bias
-            entry_prices = df_sorted["open"].shift(-1).values
-            atr_at_entry = df_sorted["atr"].values
-
-            tp_multipliers, sl_multipliers = self._calculate_dynamic_barriers(df_sorted, atr_at_entry)
-            tp_prices = entry_prices + tp_multipliers * atr_at_entry
-            sl_prices = entry_prices - sl_multipliers * atr_at_entry
-
-            # Ensure last entry price is NaN as there's no next bar to enter on
-            entry_prices[-1] = np.nan
-            tp_prices[-1] = np.nan
-            sl_prices[-1] = np.nan
-
-            results = await loop.run_in_executor(
-                self.executor,
-                self._check_barriers_optimized,
-                df_sorted["high"].values,
-                df_sorted["low"].values,
-                df_sorted["open"].values,
-                df_sorted["close"].values,
-                entry_prices,
-                tp_prices,
-                sl_prices,
-                self.config.max_holding_periods,
-                self.config.epsilon,
-            )
+            inputs, tp_multipliers, sl_multipliers = self._prepare_labeling_inputs(df_sorted)
+            results = await self._run_barrier_check(inputs)
 
             labeled_df = self._prepare_labels_dataframe(
                 instrument_id,
                 df_sorted,
                 results,
-                entry_prices,
-                tp_prices,
-                sl_prices,
+                inputs.entry_prices,
+                inputs.tp_prices,
+                inputs.sl_prices,
                 tp_multipliers,
                 sl_multipliers,
                 timeframe,
             )
+
             if labeled_df.empty:
-                logger.warning(f"No valid labels generated for {symbol}")
+                logger.warning(
+                    f"No valid labels were generated for {symbol}. This may be due to insufficient data or market conditions."
+                )
                 return None
 
-            stats = self._calculate_statistics(symbol, df_sorted, labeled_df, start_time, timeframe)
-
-            if not labeled_df.empty:
-                labels_to_insert = [LabelData(**row) for row in labeled_df.to_dict("records")]
-                await self.label_repo.insert_labels(instrument_id, labels_to_insert)
-                logger.info(f"Stored {len(labels_to_insert)} labels for {symbol} in {stats.processing_time_ms:.2f}ms")
-
-            with self.stats_lock:
-                self.label_stats[symbol] = stats
-            return stats
+            return await self._calculate_and_store_results(symbol, timeframe, df_sorted, labeled_df, start_time)
 
         except Exception as e:
-            logger.error(f"Failed to process {symbol}: {e}", exc_info=True)
+            logger.error(f"A critical error occurred while processing {symbol}: {e}", exc_info=True)
             return None
 
     def _get_annualization_factor(self, timeframe: str) -> float:
-        """
-        Calculate annualization factor for Sharpe ratio.
-        Handles various timeframe formats robustly.
-        """
-        timeframe = str(timeframe).upper().replace(" ", "")
-
-        # Indian markets (NSE/BSE): 375 minutes per day, 252 trading days
-        # Adjust these values based on your market
-        MINUTES_PER_DAY = 375
-        DAYS_PER_YEAR = 252
-
-        # Parse numeric value and unit
+        logger.debug(f"Calculating annualization factor for timeframe: {timeframe}")
+        timeframe_upper = str(timeframe).upper().replace(" ", "")
         import re
 
-        match = re.match(r"(\d+)([A-Z]+)", timeframe)
+        match = re.match(r"(\d+)([A-Z]+)", timeframe_upper)
         if not match:
-            logger.warning(f"Could not parse timeframe '{timeframe}', defaulting to daily")
-            return DAYS_PER_YEAR
+            logger.error(f"Could not parse timeframe '{timeframe}'. Expected format like '15MIN', '1H', '1D'.")
+            raise ValueError(f"Invalid timeframe format: {timeframe}")
 
         value = int(match.group(1))
         unit = match.group(2)
 
+        MINUTES_PER_DAY = 375  # Typical for equity markets
+        DAYS_PER_YEAR = 252
+
         if "MIN" in unit:
-            bars_per_day = MINUTES_PER_DAY / value
-            return bars_per_day * DAYS_PER_YEAR
-        if "H" in unit or "HOUR" in unit:
-            bars_per_day = MINUTES_PER_DAY / (value * 60)
-            return bars_per_day * DAYS_PER_YEAR
-        if "D" in unit or "DAY" in unit:
+            return (MINUTES_PER_DAY / value) * DAYS_PER_YEAR
+        if "H" in unit:
+            return (MINUTES_PER_DAY / (value * 60)) * DAYS_PER_YEAR
+        if "D" in unit:
             return DAYS_PER_YEAR / value
-        if "W" in unit or "WEEK" in unit:
+        if "W" in unit:
             return 52 / value
-        if "M" in unit or "MONTH" in unit:
+        if "M" in unit:
             return 12 / value
-        logger.warning(f"Unknown timeframe unit '{unit}', defaulting to daily")
-        return DAYS_PER_YEAR
+
+        logger.error(f"Unknown timeframe unit '{unit}' in timeframe '{timeframe}'.")
+        raise ValueError(f"Unknown timeframe unit: {unit}")
 
     def _calculate_statistics(
         self, symbol: str, original_df: pd.DataFrame, labeled_df: pd.DataFrame, start_time: datetime, timeframe: str
     ) -> LabelingStats:
-        """Calculate comprehensive labeling statistics."""
+        logger.debug(f"Calculating statistics for {symbol} ({timeframe}).")
         label_counts = labeled_df["label"].value_counts().to_dict()
         label_distribution = {
             "BUY": label_counts.get(Label.BUY, 0),
             "NEUTRAL": label_counts.get(Label.NEUTRAL, 0),
             "SELL": label_counts.get(Label.SELL, 0),
         }
-
         avg_returns = labeled_df.groupby("label")["barrier_return"].mean().to_dict()
         avg_return_by_label = {
             "BUY": avg_returns.get(Label.BUY, 0.0),
             "NEUTRAL": avg_returns.get(Label.NEUTRAL, 0.0),
             "SELL": avg_returns.get(Label.SELL, 0.0),
         }
-
         exit_reason_counts = labeled_df["exit_reason"].value_counts().to_dict()
         avg_holding = labeled_df["exit_bar_offset"].mean()
         returns = labeled_df["barrier_return"]
@@ -607,100 +733,69 @@ class OptimizedTripleBarrierLabeler:
         annualization_factor = self._get_annualization_factor(timeframe)
         sharpe_ratio = np.sqrt(annualization_factor) * returns.mean() / (returns.std() + 1e-10)
 
-        # CORRECTED WIN RATE LOGIC
-        # Consider only trades that hit either TP or SL as conclusive outcomes
         conclusive_trades = labeled_df[labeled_df["exit_reason"].isin([ExitReason.TP_HIT.name, ExitReason.SL_HIT.name])]
+        win_rate = (
+            len(conclusive_trades[conclusive_trades["exit_reason"] == ExitReason.TP_HIT.name]) / len(conclusive_trades)
+            if not conclusive_trades.empty
+            else 0.0
+        )
 
-        if not conclusive_trades.empty:
-            successful_trades = conclusive_trades[conclusive_trades["exit_reason"] == ExitReason.TP_HIT.name]
-            win_rate = len(successful_trades) / len(conclusive_trades)
-        else:
-            win_rate = 0.0  # or np.nan
-
-        # Add profit factor
         tp_returns = labeled_df[labeled_df["exit_reason"] == ExitReason.TP_HIT.name]["barrier_return"]
         sl_returns = labeled_df[labeled_df["exit_reason"] == ExitReason.SL_HIT.name]["barrier_return"]
-
-        gross_profits = tp_returns[tp_returns > 0].sum() if len(tp_returns) > 0 else 0
-        gross_losses = abs(sl_returns[sl_returns < 0].sum()) if len(sl_returns) > 0 else 0
-
-        if gross_losses > 0:
-            profit_factor = gross_profits / gross_losses
-        elif gross_profits > 0:
-            profit_factor = float("inf")
-        else:
-            profit_factor = 0.0
-
-        data_quality = len(labeled_df) / len(original_df) * 100
-        processing_time = (datetime.now() - start_time).total_seconds() * 1000
+        gross_profits = tp_returns[tp_returns > 0].sum()
+        gross_losses = abs(sl_returns[sl_returns < 0].sum())
+        profit_factor = gross_profits / gross_losses if gross_losses > 1e-9 else float("inf")
 
         return LabelingStats(
             symbol=symbol,
+            timeframe=timeframe,
             total_bars=len(original_df),
             labeled_bars=len(labeled_df),
             label_distribution=label_distribution,
             avg_return_by_label=avg_return_by_label,
             exit_reasons=exit_reason_counts,
-            avg_holding_period=avg_holding,
-            processing_time_ms=processing_time,
-            data_quality_score=data_quality,
-            sharpe_ratio=sharpe_ratio,
-            win_rate=win_rate,
-            profit_factor=profit_factor,
+            avg_holding_period=float(avg_holding),
+            processing_time_ms=(datetime.now() - start_time).total_seconds() * 1000,
+            data_quality_score=len(labeled_df) / len(original_df) * 100 if len(original_df) > 0 else 0,
+            sharpe_ratio=float(sharpe_ratio),
+            win_rate=float(win_rate),
+            profit_factor=float(profit_factor),
         )
 
     def calculate_sample_weights(self, labeled_df: pd.DataFrame) -> NDArray[np.float64]:
-        """
-        Calculate sample weights based on label uniqueness.
-        Implements methodology from AFML Chapter 4.
-
-        Args:
-            labeled_df: DataFrame with labels
-
-        Returns:
-            Array of sample weights
-        """
+        logger.debug(f"Calculating sample weights for {len(labeled_df)} labels.")
         n = len(labeled_df)
-        weights = np.ones(n)
+        if n == 0:
+            return np.array([])
 
-        # Sort by timestamp
+        weights = np.ones(n)
         df = labeled_df.sort_values("ts").reset_index(drop=True)
 
-        # Calculate overlaps
         for i in range(n):
             start_i = i
             end_i = i + df.iloc[i]["exit_bar_offset"]
-
-            overlap_count = 0
             total_overlap = 0.0
-
+            overlap_count = 0
             for j in range(n):
                 if i == j:
                     continue
-
                 start_j = j
                 end_j = j + df.iloc[j]["exit_bar_offset"]
-
-                # Check for overlap
                 if start_i <= end_j and end_i >= start_j:
                     overlap_start = max(start_i, start_j)
                     overlap_end = min(end_i, end_j)
                     overlap_fraction = (overlap_end - overlap_start + 1) / (end_i - start_i + 1)
                     total_overlap += overlap_fraction
                     overlap_count += 1
-
-            # Weight inversely proportional to average overlap
             if overlap_count > 0:
-                avg_overlap = total_overlap / overlap_count
-                weights[i] = np.exp(-self.config.sample_weight_decay_factor * avg_overlap)
-            else:
-                weights[i] = 1.0
+                weights[i] = np.exp(-self.config.sample_weight_decay_factor * (total_overlap / overlap_count))
 
-        # Normalize weights
-        return weights / weights.sum() * len(weights)
+        normalized_weights = weights / weights.sum() * n
+        logger.info("Sample weight calculation completed.")
+        return normalized_weights
 
     async def process_symbols_parallel(self, symbol_data: dict[int, dict[str, Any]]) -> dict[str, LabelingStats]:
-        """Process multiple symbols in parallel with progress tracking."""
+        logger.info(f"Processing {len(symbol_data)} symbols in parallel.")
         tasks = [
             self.process_symbol(inst_id, info["symbol"], info["data"], info.get("timeframe", "15min"))
             for inst_id, info in symbol_data.items()
@@ -712,15 +807,19 @@ class OptimizedTripleBarrierLabeler:
             result_item = results[i]
             if isinstance(result_item, LabelingStats):
                 stats_dict[info["symbol"]] = result_item
-            elif result_item is None:
-                logger.warning(f"No labels generated for {info['symbol']}")
             elif isinstance(result_item, Exception):
-                logger.error(f"Failed to process {info['symbol']}: {result_item}")
+                logger.error(f"An exception occurred while processing {info['symbol']}: {result_item}", exc_info=True)
+            else:
+                logger.warning(f"Processing for {info['symbol']} did not return statistics.")
 
-        logger.info(f"Parallel labeling completed: {len(stats_dict)}/{len(symbol_data)} symbols processed successfully")
+        successful_count = len(stats_dict)
+        total_count = len(symbol_data)
+        logger.info(f"Parallel labeling completed: {successful_count}/{total_count} symbols processed successfully.")
+        if successful_count < total_count:
+            logger.error(f"{total_count - successful_count} symbols failed to process.")
+
         return stats_dict
 
     async def shutdown(self) -> None:
-        """--- SUGGESTION IMPLEMENTED: Gracefully shuts down the process pool executor. ---"""
         logger.info("Shutting down the ProcessPoolExecutor.")
         self.executor.shutdown(wait=True)

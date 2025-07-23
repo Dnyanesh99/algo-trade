@@ -16,78 +16,112 @@ class KiteAuthenticator:
     """
 
     def __init__(self, broker_config: BrokerConfig) -> None:
+        if not broker_config.api_key or not broker_config.api_secret:
+            logger.critical("CRITICAL: Broker API key or API secret is not configured.")
+            raise ValueError("BrokerConfig is missing required 'api_key' or 'api_secret'. System cannot start.")
+
         self.broker_config = broker_config
         self.redirect_url = broker_config.redirect_url
-        self.kite = KiteConnect(api_key=broker_config.api_key)
+
+        try:
+            self.kite = KiteConnect(api_key=broker_config.api_key)
+            logger.info("KiteConnect client initialized successfully.")
+        except Exception as e:
+            logger.critical(f"Failed to initialize KiteConnect client: {e}", exc_info=True)
+            raise RuntimeError("Could not initialize KiteConnect client.") from e
+
         self.token_manager = TokenManager()
+        logger.info("KiteAuthenticator initialized.")
 
     def set_redirect_url(self, new_url: str) -> None:
         """
         Sets a new redirect URL for the KiteConnect instance.
         This is useful when the auth server needs to dynamically assign a port.
         """
+        if not new_url or not new_url.startswith("http"):
+            logger.error(f"Attempted to set an invalid redirect URL: '{new_url}'")
+            raise ValueError("A valid, absolute redirect URL must be provided.")
+
         self.redirect_url = new_url
         self.kite.redirect_url = new_url
-        logger.info(f"KiteConnect redirect URL updated to: {new_url}")
+        logger.info(f"KiteConnect redirect URL successfully updated to: {new_url}")
 
     def generate_login_url(self) -> str:
         """
         Generates the login URL for the KiteConnect authentication.
         The user needs to visit this URL to grant access.
         """
+        logger.info("Generating KiteConnect login URL.")
         try:
             login_url: str = self.kite.login_url()
-            logger.info(f"Generated KiteConnect login URL: {login_url}")
+            logger.info(f"Successfully generated KiteConnect login URL: {login_url}")
             return login_url
         except Exception as e:
-            logger.error(f"Error generating login URL: {e}")
-            raise
+            logger.critical(f"Failed to generate login URL: {e}", exc_info=True)
+            raise RuntimeError("Could not generate KiteConnect login URL.") from e
 
-    def generate_session(self, request_token: str) -> str:
+    def authenticate(self, request_token: str) -> tuple[str, str]:
         """
-        Exchanges the request token for an access token.
+        Main authentication method. Exchanges a request token for access and refresh tokens.
+        This is a critical step in the OAuth flow.
+
+        Args:
+            request_token: The token received from the broker after user login.
+
+        Returns:
+            A tuple containing the access_token and refresh_token.
+
+        Raises:
+            ValueError: If the request_token is empty or invalid.
+            RuntimeError: If the authentication process fails for any reason.
         """
+        if not request_token or not isinstance(request_token, str):
+            logger.error("Authenticate called with invalid or empty request_token.")
+            raise ValueError("Request token must be a non-empty string.")
+
+        logger.info(
+            f"Attempting to authenticate and generate session with request token ending in '...{request_token[-4:]}'"
+        )
         start_time = time.monotonic()
+
         try:
             data = self.kite.generate_session(request_token, self.broker_config.api_secret)
-            access_token: str = data["access_token"]
-
-            # Record successful authentication metrics
             duration = time.monotonic() - start_time
-            metrics_registry.record_auth_request("generate_session", True, duration)
 
-            logger.info("Successfully generated KiteConnect session and retrieved access token.")
-            return access_token
-        except (TokenException, NetworkException) as e:
-            # Record failed authentication metrics
+            access_token = data.get("access_token")
+            refresh_token = data.get("refresh_token")
+
+            if not access_token:
+                logger.critical(
+                    f"Authentication response from broker is missing access_token. Response: {data}"
+                )
+                metrics_registry.record_auth_request("generate_session", False, duration)
+                raise RuntimeError("Invalid token data received from broker.")
+            
+            if not refresh_token:
+                logger.warning(
+                    f"No refresh token provided by broker. Only access token will be available. This may require re-authentication when token expires."
+                )
+
+            metrics_registry.record_auth_request("generate_session", True, duration)
+            if refresh_token:
+                logger.info(
+                    f"Successfully generated session in {duration:.2f} seconds. Received access and refresh tokens."
+                )
+            else:
+                logger.info(
+                    f"Successfully generated session in {duration:.2f} seconds. Received access token only."
+                )
+            return access_token, refresh_token
+
+        except (TokenException, NetworkException, KiteException) as e:
             duration = time.monotonic() - start_time
             metrics_registry.record_auth_request("generate_session", False, duration)
+            logger.critical(f"Authentication failed due to a KiteConnect API error: {e}", exc_info=True)
+            raise RuntimeError("Failed to generate session due to broker API error.") from e
 
-            logger.error(f"Error generating session: {e}")
-            raise
-        except KiteException as e:
-            logger.error(f"KiteConnect error generating session: {e}")
-            raise
         except Exception as e:
-            logger.error(f"Unexpected error generating session: {e}")
-            raise
-
-    def authenticate(self, request_token: str) -> str:
-        """
-        Main authentication method. Takes a request token and returns the access token.
-        """
-        if not request_token:
-            raise ValueError("Request token cannot be empty.")
-
-        logger.info(f"Attempting to authenticate with request token: {request_token}")
-        try:
-            access_token = self.generate_session(request_token)
-            self.token_manager.set_access_token(access_token)
-            logger.info("Authentication successful and token stored in TokenManager.")
-            return access_token
-        except (TokenException, NetworkException, KiteException) as e:
-            logger.critical(f"Authentication failed with KiteConnect error: {e}")
-            raise
-        except Exception as e:
-            logger.critical(f"Authentication failed with unexpected error: {e}")
-            raise
+            duration = time.monotonic() - start_time
+            metrics_registry.record_auth_request("generate_session", False, duration)
+            logger.critical(f"An unexpected critical error occurred during authentication: {e}", exc_info=True)
+            raise RuntimeError("An unexpected error occurred during session generation.") from e

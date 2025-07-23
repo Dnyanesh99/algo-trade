@@ -23,22 +23,34 @@ class LabelRepository:
 
     def __init__(self) -> None:
         self.db_manager = db_manager
+        if not config.system or not config.system.timezone:
+            logger.critical("CRITICAL: System timezone is not configured in config.yaml.")
+            raise ValueError("System timezone must be configured for the LabelRepository.")
+        self.app_timezone = pytz.timezone(config.system.timezone)
+        logger.info(f"LabelRepository initialized with timezone '{self.app_timezone}'.")
 
-    async def insert_labels(self, instrument_id: int, labels_data: list[LabelData]) -> str:
+    async def insert_labels(self, instrument_id: int, labels_data: list[LabelData]) -> None:
         """
         Inserts labels data into the labels table.
 
         Args:
-            instrument_id (int): The ID of the instrument.
-            labels_data (List[LabelData]): List of LabelData objects.
+            instrument_id: The ID of the instrument.
+            labels_data: A list of LabelData objects.
 
-        Returns:
-            str: Command status from the database.
+        Raises:
+            ValueError: If input arguments are invalid.
+            RuntimeError: If the database insertion fails.
         """
+        if not labels_data:
+            logger.warning(f"insert_labels called with no data for instrument {instrument_id}. Nothing to do.")
+            return
+        if not isinstance(instrument_id, int):
+            raise ValueError("Invalid instrument_id type.")
+
         query = queries.label_repo["insert_labels"]
         records = [
             (
-                app_timezone.localize(d.ts) if d.ts.tzinfo is None else d.ts,
+                self.app_timezone.localize(d.ts) if d.ts.tzinfo is None else d.ts,
                 instrument_id,
                 d.timeframe,
                 d.label,
@@ -59,47 +71,63 @@ class LabelRepository:
         try:
             async with self.db_manager.transaction() as conn:
                 await conn.executemany(query, records)
-                logger.info(f"Inserted/Updated {len(labels_data)} label records for {instrument_id}.")
-                return "INSERT OK"
+            logger.info(f"Successfully inserted/updated {len(records)} label records for instrument {instrument_id}.")
         except Exception as e:
-            logger.error(f"Error inserting labels data for {instrument_id}: {e}")
-            raise
+            logger.error(f"Database error inserting labels for instrument {instrument_id}: {e}", exc_info=True)
+            raise RuntimeError("Failed to insert label data.") from e
 
     async def get_labels(
         self, instrument_id: int, timeframe: str, start_time: datetime, end_time: datetime
     ) -> list[LabelData]:
         """
         Fetches labels data for a given instrument and timeframe within a time range.
+
+        Raises:
+            RuntimeError: If the database query fails.
         """
         query = queries.label_repo["get_labels"]
+        logger.debug(
+            f"Fetching labels for instrument {instrument_id} ({timeframe}) between {start_time} and {end_time}."
+        )
         try:
             rows = await self.db_manager.fetch_rows(query, instrument_id, timeframe, start_time, end_time)
-            logger.debug(
-                f"Fetched {len(rows)} label records for {instrument_id} ({timeframe}) from {start_time} to {end_time}."
-            )
+            logger.info(f"Fetched {len(rows)} label records for instrument {instrument_id} ({timeframe}).")
             return [LabelData.model_validate(dict(row)) for row in rows]
         except Exception as e:
-            logger.error(f"Error fetching labels data for {instrument_id} ({timeframe}): {e}")
-            raise
+            logger.error(
+                f"Database error fetching labels for instrument {instrument_id} ({timeframe}): {e}", exc_info=True
+            )
+            raise RuntimeError("Failed to fetch label data.") from e
 
     async def get_label_statistics(self, instrument_id: int, timeframe: str) -> dict[str, Any]:
         """
         Calculates and returns statistics about labels for a given instrument and timeframe.
+
+        Raises:
+            RuntimeError: If the database query fails.
         """
         query = queries.label_repo["get_label_statistics"]
+        logger.debug(f"Fetching label statistics for instrument {instrument_id} ({timeframe}).")
         try:
             rows = await self.db_manager.fetch_rows(query, instrument_id, timeframe)
-            stats: dict[str, Any] = {"total_labels": 0}
+            stats: dict[str, Any] = {"total_labels": 0, "BUY": {}, "SELL": {}, "NEUTRAL": {}}
+            total_labels = 0
             for row in rows:
-                label_name = "BUY" if row["label"] == 1 else ("SELL" if row["label"] == -1 else "NEUTRAL")
+                label_val = row.get("label")
+                count = row.get("count", 0)
+                label_name = "BUY" if label_val == 1 else ("SELL" if label_val == -1 else "NEUTRAL")
                 stats[label_name] = {
-                    "count": row["count"],
-                    "avg_return": row["avg_return"],
-                    "std_return": row["std_return"],
+                    "count": count,
+                    "avg_return": row.get("avg_return"),
+                    "std_return": row.get("std_return"),
                 }
-                stats["total_labels"] += row["count"]
-            logger.debug(f"Fetched label statistics for {instrument_id} ({timeframe}): {stats}")
+                total_labels += count
+            stats["total_labels"] = total_labels
+
+            logger.info(f"Successfully fetched label statistics for instrument {instrument_id} ({timeframe}).")
             return stats
         except Exception as e:
-            logger.error(f"Error fetching label statistics for {instrument_id} ({timeframe}): {e}")
-            raise
+            logger.error(
+                f"Database error fetching label statistics for {instrument_id} ({timeframe}): {e}", exc_info=True
+            )
+            raise RuntimeError("Failed to fetch label statistics.") from e

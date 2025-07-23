@@ -21,7 +21,14 @@ def get_candle_start_time(
     if timezone and timestamp.tzinfo is None:
         timestamp = timezone.localize(timestamp)
     elif timezone and timestamp.tzinfo != timezone:
-        timestamp = timestamp.astimezone(timezone)
+        try:
+            timestamp = timestamp.astimezone(timezone)
+        except Exception as e:
+            # Log error if timezone conversion fails unexpectedly
+            from src.utils.logger import LOGGER as logger
+
+            logger.error(f"Timezone conversion failed for timestamp {timestamp}: {e}", exc_info=True)
+            raise RuntimeError("Failed to convert timestamp to specified timezone.") from e
 
     timestamp_in_minutes = timestamp.hour * 60 + timestamp.minute
     floored_minute = (timestamp_in_minutes // timeframe_minutes) * timeframe_minutes
@@ -47,7 +54,13 @@ def get_next_candle_boundary(
         if current_time.tzinfo is None:
             current_time = timezone.localize(current_time)
         elif current_time.tzinfo != timezone:
-            current_time = current_time.astimezone(timezone)
+            try:
+                current_time = current_time.astimezone(timezone)
+            except Exception as e:
+                from src.utils.logger import LOGGER as logger
+
+                logger.error(f"Timezone conversion failed for current_time {current_time}: {e}", exc_info=True)
+                raise RuntimeError("Failed to convert current_time to specified timezone.") from e
 
     # Calculate next boundary
     current_minute = current_time.minute

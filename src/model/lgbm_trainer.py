@@ -11,6 +11,7 @@ import numpy as np
 import optuna
 import pandas as pd
 import pytz
+from numpy.typing import NDArray
 from sklearn.metrics import (
     accuracy_score,
     classification_report,
@@ -54,26 +55,27 @@ class LGBMTrainer:
         health_monitor: HealthMonitor,
         feature_calculator: FeatureCalculator,
     ):
+        if not all(isinstance(repo, (FeatureRepository, LabelRepository)) for repo in [feature_repo, label_repo]):
+            logger.error("TypeError: feature_repo and label_repo must be valid repository instances.")
+            raise TypeError("feature_repo and label_repo must be valid repository instances.")
+        # Type hints ensure error_handler, health_monitor, and feature_calculator are valid instances
+
         self.feature_repo = feature_repo
         self.label_repo = label_repo
         self.error_handler = error_handler
         self.health_monitor = health_monitor
         self.feature_calculator = feature_calculator
-
-        # NEW: Feature Engineering Pipeline Integration
         self.feature_engineering = self.feature_calculator.feature_engineering
 
-        # Load configuration
-        if config.model_training is None:
-            raise ValueError("Model training configuration is required")
+        if not config.model_training:
+            logger.error("ValueError: model_training configuration is required for LGBMTrainer initialization.")
+            raise ValueError("model_training configuration is required.")
         self.model_config: ModelTrainingConfig = config.model_training
+
         self.artifacts_path = Path(self.model_config.artifacts_path)
         self.artifacts_path.mkdir(parents=True, exist_ok=True)
 
-        # Initialize scaler for feature normalization
         self.scaler = StandardScaler()
-
-        # Track training history
         self.training_history: list[dict[str, Any]] = []
 
         logger.info("LGBMTrainer initialized with production configuration.")
@@ -85,47 +87,37 @@ class LGBMTrainer:
         Main training orchestration with optional hyperparameter optimization.
         """
         training_start_time = datetime.now()
+        logger.info(
+            f"Starting LightGBM training for instrument {instrument_id} ({timeframe}) "
+            f"with hyperparameter optimization: {optimize_hyperparams}."
+        )
 
         try:
-            logger.info(
-                f"Starting LightGBM training for {instrument_id} ({timeframe}) "
-                f"with hyperparameter optimization: {optimize_hyperparams}"
-            )
-
-            # 1. Fetch and prepare data
             train_df = await self._fetch_training_data(instrument_id, timeframe)
-            min_data_for_training = self.model_config.min_data_for_training
-            if train_df.empty or len(train_df) < min_data_for_training:
+            if train_df.empty or len(train_df) < self.model_config.min_data_for_training:
                 logger.warning(
-                    f"Insufficient data for {instrument_id} ({timeframe}): {len(train_df)} < {min_data_for_training}"
+                    f"Insufficient data for training {instrument_id} ({timeframe}): "
+                    f"{len(train_df)} rows found, {self.model_config.min_data_for_training} required."
                 )
                 return None
 
-            # 2. Clean and validate data
             train_df = self._clean_data(train_df)
 
-            # 3. Feature engineering (assuming this is part of your calculator)
-            # train_df = self.feature_calculator.add_model_specific_features(train_df)
-
-            # 4. Split features and labels
             feature_cols = [
                 col
                 for col in train_df.columns
                 if col not in ["label", "timestamp", "barrier_return", "volatility_at_entry"]
             ]
-            X = train_df[feature_cols]
-            y = train_df["label"]
+            X, y = train_df[feature_cols], train_df["label"]
 
-            # 5. Handle class imbalance
             class_weights = self._calculate_class_weights(y)
 
-            # 6. Get optimal parameters
-            if optimize_hyperparams:
-                best_params = await self._optimize_hyperparameters(X, y, class_weights)
-            else:
-                best_params = self._get_default_params()
+            best_params = (
+                await self._optimize_hyperparameters(X, y, class_weights)
+                if optimize_hyperparams
+                else self._get_default_params()
+            )
 
-            # 7. Perform walk-forward validation
             (
                 model,
                 metrics,
@@ -135,18 +127,13 @@ class LGBMTrainer:
             ) = await self._walk_forward_validation(X, y, best_params, class_weights)
 
             if model is None or last_fold_scaler is None or last_fold_X_train is None:
-                logger.error(f"Model training failed for {instrument_id} ({timeframe}) during walk-forward validation.")
-                return None
+                logger.error("RuntimeError: Walk-forward validation failed to produce a valid model or its components.")
+                raise RuntimeError("Walk-forward validation failed to produce a valid model.")
 
             self.scaler = last_fold_scaler
-
-            # 8. Train final model on all data
             final_model = await self._train_final_model(X, y, best_params, class_weights)
-
-            # 9. Calculate and log metrics
             self._log_training_metrics(metrics, feature_importance, instrument_id, timeframe)
 
-            # 10. Save model and artifacts
             feature_stats = self._get_feature_stats(last_fold_X_train)
             model_path = await self._save_model_artifacts(
                 final_model,
@@ -159,20 +146,19 @@ class LGBMTrainer:
                 feature_stats,
             )
 
-            # NEW: Update feature selection based on training results
             await self._update_feature_selection(instrument_id, timeframe, feature_importance, metrics, model_path)
 
-            # Record successful training metrics
-            training_duration = (datetime.now() - training_start_time).total_seconds()
             metrics_registry.record_model_training(
                 instrument=str(instrument_id),
                 timeframe=timeframe,
                 model_type="lightgbm",
                 success=True,
-                duration=training_duration,
+                duration=(datetime.now() - training_start_time).total_seconds(),
             )
             self.health_monitor.record_successful_operation("model_training")
-
+            logger.info(
+                f"Successfully completed training for {instrument_id} ({timeframe}). Model saved to {model_path}."
+            )
             return model_path
 
         except Exception as e:
@@ -180,16 +166,14 @@ class LGBMTrainer:
                 "lgbm_trainer",
                 f"Training failed for {instrument_id} ({timeframe}): {e}",
                 {"instrument_id": instrument_id, "timeframe": timeframe, "error": str(e)},
+                exc_info=True,
             )
-
-            # Record failed training metrics
-            training_duration = (datetime.now() - training_start_time).total_seconds()
             metrics_registry.record_model_training(
                 instrument=str(instrument_id),
                 timeframe=timeframe,
                 model_type="lightgbm",
                 success=False,
-                duration=training_duration,
+                duration=(datetime.now() - training_start_time).total_seconds(),
             )
             return None
 
@@ -277,11 +261,11 @@ class LGBMTrainer:
         the scaler from the last fold, and the training features from the last fold.
         """
         if self.model_config is None:
-            raise ValueError("Model training configuration is required")
+            raise ValueError("Model training configuration is required for walk-forward validation.")
         tscv = TimeSeriesSplit(n_splits=self.model_config.walk_forward_validation.n_splits)
         all_predictions = []
         all_actuals = []
-        all_probabilities: list[np.ndarray] = []
+        all_probabilities: list[NDArray[np.float64]] = []
         feature_importance_sum = np.zeros(len(X.columns))
         n_windows = 0
         model = None
@@ -319,7 +303,7 @@ class LGBMTrainer:
             model = await loop.run_in_executor(None, _train_lgb_model, train_data, val_data)
 
             if model is None:
-                raise ValueError("Model training failed")
+                raise RuntimeError("Model training failed and returned None")
             y_pred_proba = model.predict(X_val_scaled, num_iteration=model.best_iteration)
             # Convert to numpy array if it's a sparse matrix
             if hasattr(y_pred_proba, "toarray"):
@@ -419,7 +403,9 @@ class LGBMTrainer:
         best_params.update(study.best_params)
         return best_params
 
-    def _calculate_metrics(self, y_true: list[int], y_pred: list[int], y_proba: list[np.ndarray]) -> dict[str, Any]:
+    def _calculate_metrics(
+        self, y_true: list[int], y_pred: list[int], y_proba: list[NDArray[np.float64]]
+    ) -> dict[str, Any]:
         """
         Calculates comprehensive evaluation metrics and records them to monitoring system.
         """

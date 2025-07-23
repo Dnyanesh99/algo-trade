@@ -2,7 +2,7 @@ import os
 import threading
 import webbrowser
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Union
 from urllib.parse import urlparse
 
 from flask import Flask, Response, jsonify, render_template, request
@@ -56,18 +56,20 @@ def auth_home() -> str:
 
 
 @app.route("/auth/status")
-def auth_status() -> Response:
+def auth_status() -> Union[Response, tuple[Response, int]]:
     """API endpoint to check current token status."""
+    logger.debug("Received request for /auth/status")
     global global_token_manager_instance
 
     if global_token_manager_instance is None:
-        return jsonify({"valid": False, "error": "Token manager not initialized"})
+        logger.error("Auth status check failed: TokenManager has not been initialized.")
+        return jsonify({"valid": False, "error": "CRITICAL: Token manager not initialized"}), 500
 
     try:
         token = global_token_manager_instance.get_access_token()
-        if token:
-            # Create a preview of the token (first 10 chars + ...)
-            token_preview = f"{token[:10]}..." if len(token) > 10 else token
+        if global_token_manager_instance.is_token_available():
+            token_preview = f"{token[:10]}..." if token and len(token) > 10 else "Token available"
+            logger.info(f"Auth status check: Token is available. Preview: {token_preview}")
             return jsonify(
                 {
                     "valid": True,
@@ -75,25 +77,33 @@ def auth_status() -> Response:
                     "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 }
             )
+        logger.warning("Auth status check: No valid access token found.")
         return jsonify({"valid": False, "error": "No access token found"})
     except Exception as e:
-        return jsonify({"valid": False, "error": str(e)})
+        logger.error(f"An unexpected error occurred in auth_status: {e}", exc_info=True)
+        return jsonify({"valid": False, "error": "An internal server error occurred."}), 500
 
 
 @app.route("/auth/login")
 def auth_login() -> str:
     """Initiate the Zerodha OAuth flow."""
+    logger.info("Received request for /auth/login, initiating OAuth flow.")
     global global_authenticator_instance
 
     if global_authenticator_instance is None:
+        logger.critical("Cannot initiate login: Authenticator has not been initialized.")
         return render_template(
-            "auth_error.html", error_type="Configuration Error", error_message="Authenticator not initialized"
+            "auth_error.html",
+            error_type="Configuration Error",
+            error_message="CRITICAL: Authenticator not initialized. System cannot proceed.",
         )
 
     try:
         auth_url = global_authenticator_instance.generate_login_url()
-        logger.info(f"Redirecting to Zerodha OAuth: {auth_url}")
-        return f"""
+        logger.info(f"Redirecting user to Zerodha OAuth URL: {auth_url}")
+        # This is a simple redirect page, no major changes needed here.
+        # The core logic is in the URL generation and the callback.
+        return f'''
         <!DOCTYPE html>
         <html>
         <head>
@@ -146,10 +156,13 @@ def auth_login() -> str:
             </div>
         </body>
         </html>
-        """
+        '''
+    except (RuntimeError, ValueError) as e:
+        logger.critical(f"Failed to generate login URL due to a critical error: {e}", exc_info=True)
+        return render_template("auth_error.html", error_type="Login Generation Error", error_message=str(e))
     except Exception as e:
-        logger.error(f"Error generating login URL: {e}")
-        return render_template("auth_error.html", error_type="Login Error", error_message=str(e))
+        logger.error(f"An unexpected error occurred during login URL generation: {e}", exc_info=True)
+        return render_template("auth_error.html", error_type="Unexpected Login Error", error_message=str(e))
 
 
 @app.route("/auth/refresh")
@@ -160,133 +173,166 @@ def auth_refresh() -> str:
 
 @app.route("/callback")
 def auth_callback() -> str:
+    """Handles the OAuth callback from Zerodha after user authentication."""
     global auth_result
     global global_authenticator_instance
     global global_token_manager_instance
+
+    logger.info(f"Received callback from broker with args: {request.args}")
     request_token = request.args.get("request_token")
     status = request.args.get("status")
-    error = request.args.get("error")
-    error_message = request.args.get("message")
 
-    if status == "success" and request_token:
-        try:
-            # Use the global authenticator instance
-            if global_authenticator_instance is None:
-                raise RuntimeError("Authenticator instance not initialized")
-
-            access_token = global_authenticator_instance.authenticate(request_token)
-            auth_result["success"] = True
-            auth_result["message"] = "Authentication successful! You can close this window."
-            logger.info("Authentication flow completed successfully.")
-            auth_success_event.set()
-
-            # Create token preview for display
-            token_preview = f"{access_token[:10]}..." if len(access_token) > 10 else access_token
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-            return render_template("auth_success.html", token_preview=token_preview, timestamp=timestamp)
-        except Exception as e:
-            auth_result["success"] = False
-            auth_result["message"] = f"Authentication failed: {e}"
-            logger.error(f"Authentication failed during token exchange: {e}")
-            auth_error_event.set()
-
-            return render_template(
-                "auth_error.html", error_type="Token Exchange Error", error_message=str(e), request_token=request_token
-            )
-    else:
-        auth_result["success"] = False
-        auth_result["message"] = f"Authentication failed: {error} - {error_message}"
-        logger.error(f"Authentication failed from Kite: {error} - {error_message}")
+    if status != "success" or not request_token:
+        error = request.args.get("error", "Unknown Error")
+        error_message = request.args.get("message", "No error message provided.")
+        logger.critical(f"OAuth failed from broker. Status: {status}, Error: {error}, Message: {error_message}")
+        auth_result = {"success": False, "message": f"OAuth failed: {error} - {error_message}"}
         auth_error_event.set()
-
         return render_template(
             "auth_error.html",
-            error_type=error or "OAuth Error",
-            error_message=error_message or "Unknown authentication error",
+            error_type=error,
+            error_message=error_message,
             request_token=request_token,
         )
+
+    logger.info("OAuth login successful, proceeding to token exchange.")
+    try:
+        if global_authenticator_instance is None or global_token_manager_instance is None:
+            logger.critical("Callback cannot proceed: Authenticator or TokenManager not initialized.")
+            raise RuntimeError("CRITICAL: System components not initialized for callback.")
+
+        logger.info("About to call authenticate() with request token")
+        access_token, refresh_token = global_authenticator_instance.authenticate(request_token)
+        logger.info(f"Authentication successful. Got access_token: {'Yes' if access_token else 'No'}, refresh_token: {'Yes' if refresh_token else 'No'}")
+        
+        logger.info("About to call set_tokens()")
+        try:
+            global_token_manager_instance.set_tokens(access_token, refresh_token)
+            logger.info("set_tokens() completed successfully")
+        except Exception as token_error:
+            logger.critical(f"CRITICAL ERROR in set_tokens(): {token_error}", exc_info=True)
+            raise
+
+        try:
+            auth_result = {"success": True, "message": "Authentication successful!"}
+            logger.info("Authentication flow completed successfully. Setting success event.")
+            auth_success_event.set()
+            logger.info("Success event has been set!")
+        except Exception as event_error:
+            logger.critical(f"CRITICAL ERROR setting success event: {event_error}", exc_info=True)
+            raise
+
+        token_preview = f"{access_token[:10]}..." if len(access_token) > 10 else access_token
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        return render_template(
+            "auth_success.html", token_preview=token_preview, timestamp=timestamp, auto_close_seconds=10
+        )
+
+    except (RuntimeError, ValueError) as e:
+        logger.critical(f"A critical error occurred during token exchange: {e}", exc_info=True)
+        auth_result = {"success": False, "message": str(e)}
+        auth_error_event.set()
+        return render_template("auth_error.html", error_type="Token Exchange Error", error_message=str(e))
+    except Exception as e:
+        logger.critical(f"An unexpected critical error occurred during callback processing: {e}", exc_info=True)
+        auth_result = {"success": False, "message": f"An unexpected error occurred: {e}"}
+        auth_error_event.set()
+        return render_template("auth_error.html", error_type="Unexpected Server Error", error_message=str(e))
 
 
 def start_auth_server_and_wait(broker_config: BrokerConfig, auth_server_config: AuthServerConfig) -> bool:
     global global_token_manager_instance, global_authenticator_instance
 
-    # Initialize the global instances
-    global_token_manager_instance = TokenManager()
-    global_authenticator_instance = KiteAuthenticator(broker_config)
+    logger.info("Initializing authentication process...")
+    try:
+        global_token_manager_instance = TokenManager()
+        global_authenticator_instance = KiteAuthenticator(broker_config)
+    except (ValueError, RuntimeError) as e:
+        logger.critical(f"Failed to initialize core authentication components: {e}", exc_info=True)
+        return False
 
     if not broker_config.redirect_url:
-        raise ValueError("Broker redirect URL is not configured.")
-
-    host: Optional[str] = urlparse(broker_config.redirect_url).hostname
-    initial_port: Optional[int] = urlparse(broker_config.redirect_url).port
-
-    if host is None or initial_port is None:
-        raise ValueError(f"Invalid redirect URL configured: {broker_config.redirect_url}. Host or port is missing.")
-
-    server: FlaskServer
-    current_port = initial_port
-    max_retries = auth_server_config.max_retries
-    # Use 0.0.0.0 to bind to all interfaces in container, but keep the original host for redirect URL
-    server_host = auth_server_config.server_host
-    for attempt in range(max_retries):
-        try:
-            server = FlaskServer(server_host, current_port)
-            server.daemon = True  # Allow the main program to exit even if the server is running
-            server.start()
-            # Get the actual port if 0 was used
-            if current_port == 0:
-                current_port = server.srv.socket.getsockname()[1]
-                logger.info(f"Server started on dynamically assigned port: {current_port}")
-            break
-        except OSError as e:
-            if "Address already in use" in str(e):
-                logger.warning(
-                    f"Port {current_port} already in use. Attempting to find a new port (attempt {attempt + 1}/{max_retries})."
-                )
-                current_port = 0  # Let the OS choose a random port
-            else:
-                raise
-    else:
-        raise RuntimeError(f"Failed to start Flask server after {max_retries} attempts.")
-
-    # Update the redirect URL to reflect the actual port
-    parsed_url = urlparse(broker_config.redirect_url)
-    new_redirect_url = parsed_url._replace(netloc=f"{host}:{current_port}").geturl()
-    logger.info(f"Using redirect URL: {new_redirect_url}")
-
-    # Update the authenticator's redirect URL
-    if global_authenticator_instance is None:
-        raise RuntimeError("Authenticator instance not initialized")
-    global_authenticator_instance.set_redirect_url(new_redirect_url)
-
-    # Open the web UI instead of directly opening the OAuth URL
-    # Use localhost for external access (outside container) but server binds to 0.0.0.0
-    web_ui_url = f"http://localhost:{current_port}/"
-    logger.info(f"🚀 Authentication UI is ready at: {web_ui_url}")
-    logger.info(f"📱 Please open your browser and navigate to: {web_ui_url}")
-    logger.info(f"🔧 Server binding: http://{server_host}:{current_port}/")
-
-    # Try to open browser, but don't fail if it's not available (like in Docker)
-    if auth_server_config.open_browser:
-        try:
-            webbrowser.open(web_ui_url)
-            logger.info("✅ Browser opened successfully")
-        except Exception as e:
-            logger.warning(f"⚠️  Could not open browser automatically: {e}")
-            logger.info(f"🔗 Please manually open: {web_ui_url}")
+        logger.critical("CRITICAL: Broker redirect URL is not configured in config.yaml.")
+        raise ValueError("Broker redirect URL is mandatory for the authentication server.")
 
     try:
-        # Wait for either success or error event
-        auth_success_event.wait(timeout=auth_server_config.timeout_seconds)  # Wait for 5 minutes
-        if not auth_success_event.is_set():
-            logger.error("Authentication timed out or failed to complete.")
-            auth_result["success"] = False
-            auth_result["message"] = "Authentication timed out or failed."
-    finally:
-        logger.debug("Attempting to shut down Flask server.")
-        server.shutdown()
-        server.join()  # Ensure the server thread has completely shut down
-        server.stopped.wait(timeout=5)  # Wait for the server to confirm it's stopped
+        parsed_url = urlparse(broker_config.redirect_url)
+        host: Optional[str] = parsed_url.hostname
+        initial_port: Optional[int] = parsed_url.port
+        if not host or not initial_port:
+            raise ValueError("Hostname or port is missing in the redirect URL.")
+    except (ValueError, AttributeError) as e:
+        logger.critical(f"Invalid redirect URL configured: '{broker_config.redirect_url}'. {e}")
+        raise ValueError(f"Invalid redirect URL: {broker_config.redirect_url}") from e
 
-    return bool(auth_result["success"])
+    server: Optional[FlaskServer] = None
+    current_port = initial_port
+    server_host = auth_server_config.server_host
+    if not server_host:
+        logger.critical("CRITICAL: Auth server host is not configured in config.yaml.")
+        raise ValueError("auth_server.server_host is a mandatory configuration.")
+
+    for attempt in range(auth_server_config.max_retries):
+        try:
+            logger.info(f"Attempting to start auth server on {server_host}:{current_port} (Attempt {attempt + 1})")
+            server = FlaskServer(server_host, current_port)
+            server.daemon = True
+            server.start()
+            if current_port == 0:
+                # Get the actual port if 0 was used for dynamic allocation
+                current_port = server.srv.socket.getsockname()[1]
+                logger.info(f"Server started on dynamically assigned port: {current_port}")
+            break  # Exit loop on success
+        except OSError as e:
+            if "Address already in use" in str(e):
+                logger.warning(f"Port {current_port} is in use. Retrying on a different port.")
+                current_port = 0  # Let the OS choose a random available port
+            else:
+                logger.critical(f"An unexpected OS error occurred while starting the server: {e}", exc_info=True)
+                raise RuntimeError("Failed to start auth server due to an OS error.") from e
+        except Exception as e:
+            logger.critical(f"An unexpected error occurred while starting the server: {e}", exc_info=True)
+            raise RuntimeError("An unexpected error prevented the auth server from starting.") from e
+    else:
+        logger.critical(f"Failed to start Flask server after {auth_server_config.max_retries} attempts.")
+        raise RuntimeError("Unable to secure a port for the authentication server.")
+
+    # Update redirect URL and authenticator with the actual port used
+    new_redirect_url = urlparse(broker_config.redirect_url)._replace(netloc=f"{host}:{current_port}").geturl()
+    logger.info(f"Final redirect URL for OAuth flow: {new_redirect_url}")
+    global_authenticator_instance.set_redirect_url(new_redirect_url)
+
+    web_ui_url = f"http://localhost:{current_port}/"
+    logger.info(f"🚀 Authentication UI is ready at: {web_ui_url}")
+    logger.info(f"🔧 Server is bound to: http://{server_host}:{current_port}/")
+
+    if auth_server_config.open_browser:
+        logger.info("Attempting to open web browser automatically.")
+        try:
+            webbrowser.open(web_ui_url)
+            logger.info("✅ Successfully opened web browser.")
+        except Exception as e:
+            logger.error(f"⚠️ Could not open browser automatically: {e}. Please open the URL manually.", exc_info=True)
+            logger.info(f"🔗 Please manually navigate to: {web_ui_url}")
+
+    try:
+        timeout = auth_server_config.timeout_seconds
+        logger.info(f"Waiting for authentication to complete. Timeout is set to {timeout} seconds.")
+        auth_completed_event = auth_success_event.wait(timeout=timeout)
+
+        if not auth_completed_event and not auth_error_event.is_set():
+            logger.error(f"Authentication timed out after {timeout} seconds. No success or error event received.")
+            auth_result.update({"success": False, "message": "Authentication timed out."})
+
+    finally:
+        logger.info("Authentication process finished or timed out. Shutting down the web server.")
+        if server:
+            server.shutdown()
+            server.join(timeout=5)
+            if server.is_alive():
+                logger.warning("Server thread did not shut down gracefully.")
+
+    logger.info(
+        f"Final authentication result: Success={auth_result.get('success')}, Message='{auth_result.get('message')}'"
+    )
+    return bool(auth_result.get("success"))

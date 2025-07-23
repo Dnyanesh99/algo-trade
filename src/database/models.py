@@ -72,3 +72,41 @@ class SignalData(BaseModel):
     price_at_signal: float
     source_feature_value: Optional[float] = None
     details: Optional[dict[str, Any]] = None
+
+
+class LabelingStatsData(BaseModel):
+    symbol: str
+    timeframe: str
+    total_bars: int
+    labeled_bars: int
+    label_distribution: dict[str, int]
+    avg_return_by_label: dict[str, float]
+    exit_reasons: dict[str, int]
+    avg_holding_period: float
+    processing_time_ms: float
+    data_quality_score: float
+    sharpe_ratio: float
+    win_rate: float
+    profit_factor: float
+    run_timestamp: datetime = datetime.now()
+
+
+class ProcessingStateData(BaseModel):
+    """Model for tracking processing completion state."""
+
+    instrument_id: int
+    process_type: str  # historical_fetch, aggregation, features, labeling
+    completed_at: datetime
+    metadata: dict[str, Any] = {}
+    status: str = "completed"  # completed, failed, in_progress
+
+
+class DataRangeData(BaseModel):
+    """Model for tracking data ranges per instrument and timeframe."""
+
+    instrument_id: int
+    timeframe: str  # 1min, 5min, 15min, 60min
+    earliest_ts: datetime
+    latest_ts: datetime
+    last_updated: datetime = datetime.now()
+    record_count: Optional[int] = None
