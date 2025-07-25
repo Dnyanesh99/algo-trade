@@ -151,7 +151,7 @@ async def start_system(
                 # Initialize components based on mode
                 if config.system.mode == "HISTORICAL_MODE":
                     # Start historical data processing using main.py architecture
-                    from main import initialize_historical_mode
+                    from main import initialize_historical_mode_enhanced
 
                     from src.database.instrument_repo import InstrumentRepository
                     from src.signal.alert_system import AlertSystem
@@ -159,7 +159,7 @@ async def start_system(
 
                     # Start historical mode in background
                     task = asyncio.create_task(
-                        initialize_historical_mode(
+                        initialize_historical_mode_enhanced(
                             config,
                             system_state,
                             AlertSystem(),

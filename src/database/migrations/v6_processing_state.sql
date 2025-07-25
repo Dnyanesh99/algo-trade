@@ -88,7 +88,7 @@ BEGIN
     ) THEN
         ALTER TABLE processing_state 
         ADD CONSTRAINT chk_process_type 
-        CHECK (process_type IN ('historical_fetch', 'aggregation', 'features', 'labeling', 'training'));
+        CHECK (process_type IN ('historical_fetch', 'aggregation', 'features', 'labeling', 'training', 'instrument_sync'));
     END IF;
 
     -- Add check constraint for status if it doesn't exist

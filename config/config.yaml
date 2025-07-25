@@ -28,34 +28,86 @@ system:
 # Intelligent processing state management and data duplication prevention
 # ============================================================================
 processing_control:
-  enabled: true
-  force_reprocess: false  # Override all state checks
-  reset_state_on_startup: false  # Clear all processing state
-  processing_mode: "smart"  # smart | force | skip
+  # Note: Frequently changing controls moved to environment variables:
+  # PROCESSING_CONTROL_ENABLED, HISTORICAL_PROCESSING_ENABLED, AGGREGATION_PROCESSING_ENABLED, 
+  # FEATURE_PROCESSING_ENABLED, LABELING_PROCESSING_ENABLED, HISTORICAL_MAX_GAP_HOURS,
+  # HISTORICAL_PARALLEL_INSTRUMENTS, AGGREGATION_REPROCESS_ON_SOURCE_CHANGE,
+  # FEATURE_INCREMENTAL_CALCULATION, FEATURE_RECOMPUTE_ON_CONFIG_CHANGE
 
-  # Component-specific controls
-  historical_processing_enabled: true
-  historical_max_gap_hours: 24  # Maximum gap to fill automatically
-  historical_parallel_instruments: 3  # Process N instruments in parallel
-
-  aggregation_processing_enabled: true
-  aggregation_reprocess_on_source_change: true
-
-  feature_processing_enabled: true
-  feature_incremental_calculation: true
-  feature_recompute_on_config_change: true
-
-  labeling_processing_enabled: true
-  labeling_batch_size: 1000
+  # Batch processing settings
+  # labeling_batch_size: 1000
   
   # Data sufficiency thresholds for smart processing
   min_candles_for_historical: 100    # Minimum 1min candles needed
   min_candles_for_aggregation: 100   # Minimum 1min candles for aggregation
-  min_candles_for_features: 50       # Minimum aggregated candles per timeframe
+  min_candles_for_features: 20       # Minimum aggregated candles per timeframe
   min_candles_for_labeling: 200      # Minimum OHLCV candles for labeling
   min_features_for_labeling: 100     # Minimum feature records for labeling
   min_existing_features_threshold: 10 # Minimum existing features to consider adequate
   min_existing_labels_threshold: 50   # Minimum existing labels to consider adequate
+
+  # Time interval configurations for data availability checks
+  historical_data_availability_days: 7    # Days to look back for historical data availability
+  aggregation_data_availability_days: 7   # Days to look back for aggregation data availability
+  features_data_availability_days: 7      # Days to look back for feature data availability
+  labeling_data_availability_days: 5      # Days to look back for labeling data availability
+  existing_features_availability_days: 2  # Days to look back for existing features
+  existing_labels_availability_days: 3    # Days to look back for existing labels
+
+# ============================================================================
+# DATA RESET CONFIGURATION
+# Configure which database tables to truncate when TRUNCATE_ALL_DATA=true
+# WARNING: This will permanently delete all data from selected tables!
+# ============================================================================
+data_reset:
+  # Enable/disable categories of tables for truncation
+  truncate_ohlcv_tables: true       # All OHLCV hypertables (1min, 5min, 15min, 60min)
+  truncate_feature_tables: true     # Features and engineered features
+  truncate_ml_tables: true          # Labels, signals, model registry
+  truncate_state_tables: true       # Processing state and data ranges
+  truncate_aggregation_tables: true # Daily/hourly aggregation tables
+  truncate_statistics_tables: true  # Performance metrics and statistics
+  
+  # Specific tables to include/exclude (overrides category settings)
+  # Set to true to include table, false to exclude, or remove line to use category setting
+  tables:
+    # OHLCV Data Tables (TimescaleDB Hypertables)
+    ohlcv_1min: true
+    ohlcv_5min: true  
+    ohlcv_15min: true
+    ohlcv_60min: true
+    
+    # Feature Engineering Tables
+    features: true
+    engineered_features: true
+    feature_scores: true
+    feature_selection_history: true 
+    feature_lineage: true
+    cross_asset_features: true
+    
+    # Views (cannot be truncated) - set to false
+    feature_performance_metrics: false  # VIEW
+    current_selected_features: false    # VIEW
+    
+    # Machine Learning Tables  
+    labels: true
+    signals: true
+    model_registry: true
+    labeling_statistics: true
+    
+    # State Management Tables
+    processing_state: true
+    data_ranges: true
+    system_operations_state: true
+    
+    # Aggregation and Analytics Tables
+    daily_ohlcv_agg: true
+    hourly_feature_agg: true
+    daily_signal_performance: true
+    
+    # System Tables (usually keep these)
+    instruments: false              # Keep instrument definitions
+    schema_migrations: false        # Keep migration history
 
 # ============================================================================
 # DATABASE CONFIGURATION
@@ -502,7 +554,7 @@ trading:
 model_training:
   # Basic Training Configuration
   artifacts_path: "models/artifacts"
-  historical_data_lookback_days: 30
+  historical_data_lookback_days: 60
   min_data_for_training: 5000
   confidence_threshold: 0.3
   drift_threshold_z_score: 3.0
@@ -596,7 +648,9 @@ model_training:
   feature_ranges:
     rsi_14: [0, 100]
     bb_position: [-3, 3]
-    macd_signal: [-2, 2]
+    macd_macd: [-50, 50]
+    macd_signal: [-50, 50]
+    macd_hist: [-30, 30]
     stoch_k: [0, 100]
     stoch_d: [0, 100]
     stoch_momentum_divergence: [-100, 100]
@@ -767,14 +821,14 @@ data_quality:
     enabled: true
     min_valid_rows: 50
     quality_score_threshold: 80.0
-    required_columns: ["ts", "open", "high", "low", "close", "volume"]
+    required_columns: ["ts", "open", "high", "low", "close"]
     expected_columns:
       date: "datetime64[ns]"
       open: "float64"
       high: "float64"
       low: "float64"
       close: "float64"
-      volume: "int64"
+      # volume: "int64"
     
     # Enhanced indicator validation thresholds
     indicator_validation:
@@ -784,13 +838,13 @@ data_quality:
 
     # Instrument segment definitions for validation logic
     instrument_segments:
-      index_segments: ["INDEX", "INDICES"]
-      equity_segments: ["EQ", "EQUITY"]
-      fno_segments: ["FUT", "OPT", "NFO-FUT", "NFO-OPT", "BFO-FUT", "BFO-OPT"]
+      index_segments: ["INDICES"]
+      equity_segments: ["EQ"]
+      fno_segments: ["NFO-FUT", "NFO-OPT", "BFO-FUT", "BFO-OPT"]
 
   # Feature Validation Configuration
   feature_validation:
-    enabled: true
+    enabled: true  # Enable feature validation
     auto_discovery: true  # Auto-discover validation rules from indicator configurations
     
     # Custom validation rules (optional)
@@ -817,7 +871,19 @@ data_quality:
           max_value: 5.0
           priority: 5
           description: "Ratio features reasonable bounds"
-    
+
+    # Price Relative Validation Rules 
+    price_relative_rules:
+        - pattern: "^sar.*$"
+          validator: "price_relative"
+          priority: 10
+          description: "SAR values must be within reasonable price range"
+          params:
+            min_price_multiplier: 0.1   # SAR should not be less than 10% of min price
+            max_price_multiplier: 1.5   # SAR should not exceed 150% of max price
+            lookback_periods: 20        # Look back period for price range
+            violation_threshold_pct: 5.0 # Allow up to 5% violations
+
     # Cross-feature consistency validation rules
     consistency_rules:
       - name: "stochastic_consistency"

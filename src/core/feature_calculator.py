@@ -88,7 +88,7 @@ class FeatureCalculator:
         self.timeframes = config.trading.feature_timeframes
         self.lookback_period = config.trading.features.lookback_period
         self.validation_enabled = config.data_quality.validation.enabled
-        
+
         # Initialize modular indicator flag early to ensure it always exists
         self.use_modular_indicators = False
         self.modular_calculator = None
@@ -707,9 +707,9 @@ class FeatureCalculator:
         if not self.use_modular_indicators:
             logger.info("Modular indicators disabled (use_modular_indicators=False), skipping health check")
             return True
-            
+
         if self.modular_calculator is None:
-            logger.error(f"Health check failed: use_modular_indicators=True but modular_calculator=None")
+            logger.error("Health check failed: use_modular_indicators=True but modular_calculator=None")
             return False
 
         try:
@@ -726,10 +726,14 @@ class FeatureCalculator:
 
             # Check if enabled indicators from config are available in the system
             enabled_indicators_from_config = []
-            if hasattr(config, 'trading') and hasattr(config.trading, 'features') and hasattr(config.trading.features, 'configurations'):
+            if (
+                hasattr(config, "trading")
+                and hasattr(config.trading, "features")
+                and hasattr(config.trading.features, "configurations")
+            ):
                 for indicator_config in config.trading.features.configurations:
                     # Check if indicator is not in disabled list
-                    disabled_indicators = getattr(config.trading.features.indicator_control, 'disabled_indicators', [])
+                    disabled_indicators = getattr(config.trading.features.indicator_control, "disabled_indicators", [])
                     if indicator_config.name not in disabled_indicators:
                         enabled_indicators_from_config.append(indicator_config.name)
 

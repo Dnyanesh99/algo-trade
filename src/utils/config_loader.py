@@ -1,5 +1,5 @@
 from datetime import date, time
-from typing import Any, Dict, Literal, Optional, Union
+from typing import Any, Literal, Optional, Union
 
 import yaml
 from pydantic import BaseModel, Field, ValidationError, model_validator
@@ -14,8 +14,8 @@ class StrictBaseModel(BaseModel):
 
 
 class MarketSessionTime(StrictBaseModel):
-    start: str = Field(pattern=r'^\d{2}:\d{2}$')  # HH:MM format
-    end: str = Field(pattern=r'^\d{2}:\d{2}$')    # HH:MM format
+    start: str = Field(pattern=r"^\d{2}:\d{2}$")  # HH:MM format
+    end: str = Field(pattern=r"^\d{2}:\d{2}$")  # HH:MM format
 
 
 class PathDependentTimeoutConfig(StrictBaseModel):
@@ -85,7 +85,7 @@ class DynamicEpsilonConfig(StrictBaseModel):
     weekly_expiry_day: int = Field(default=4, ge=0, le=6)  # 0=Monday, 6=Sunday
     monthly_expiry_week: int = Field(default=-1, ge=-1, le=4)  # -1=last week
     expiry_volatility_multiplier: float = Field(default=0.75, gt=0)
-    market_session_times: Optional[Dict[str, MarketSessionTime]] = None
+    market_session_times: Optional[dict[str, MarketSessionTime]] = None
 
 
 class LabelingConfig(StrictBaseModel):
@@ -455,10 +455,13 @@ class DataQualityFeatureValidationCustomRuleConfig(StrictBaseModel):
     max_value: Optional[float] = None
     priority: int = Field(default=5, ge=1, le=10)
     description: str = ""
+    validator: Optional[str] = None
+    params: Optional[dict[str, Any]] = None
 
 
 class DataQualityFeatureValidationCustomRulesConfig(StrictBaseModel):
     range_rules: list[DataQualityFeatureValidationCustomRuleConfig] = Field(default_factory=list)
+    price_relative_rules: list[DataQualityFeatureValidationCustomRuleConfig] = Field(default_factory=list)
 
 
 class DataQualityFeatureValidationOscillatorConsistencyConfig(StrictBaseModel):
@@ -507,6 +510,7 @@ class DataQualityFeatureValidationConfig(StrictBaseModel):
     rule_priorities: RulePrioritiesConfig = Field(default_factory=RulePrioritiesConfig)
     consistency_rules: Optional[list[dict[str, Any]]] = None
     consistency_rule_defaults: Optional[dict[str, dict[str, Any]]] = None
+    price_relative_rules: Optional[list[DataQualityFeatureValidationCustomRuleConfig]] = None
 
 
 class DataQualityConfig(StrictBaseModel):
@@ -620,6 +624,7 @@ class MetricsConfig(StrictBaseModel):
 
 class APIConfig(StrictBaseModel):
     """Configuration for API settings."""
+
     admin_token: str
     host: str = "127.0.0.1"
 
@@ -627,26 +632,8 @@ class APIConfig(StrictBaseModel):
 class ProcessingControlConfig(StrictBaseModel):
     """Configuration for processing control and state management."""
 
-    enabled: bool = True
-    force_reprocess: bool = False
-    reset_state_on_startup: bool = False
-    processing_mode: Literal["smart", "force", "skip"] = "smart"
-
     # Component-specific controls
-    historical_processing_enabled: bool = True
-    historical_max_gap_hours: int = Field(default=24, gt=0)
-    historical_parallel_instruments: int = Field(default=3, gt=0)
 
-    aggregation_processing_enabled: bool = True
-    aggregation_reprocess_on_source_change: bool = True
-
-    feature_processing_enabled: bool = True
-    feature_incremental_calculation: bool = True
-    feature_recompute_on_config_change: bool = True
-
-    labeling_processing_enabled: bool = True
-    labeling_batch_size: int = Field(default=1000, gt=0)
-    
     # Data sufficiency thresholds for smart processing
     min_candles_for_historical: int = Field(default=100, gt=0)
     min_candles_for_aggregation: int = Field(default=100, gt=0)
@@ -655,6 +642,62 @@ class ProcessingControlConfig(StrictBaseModel):
     min_features_for_labeling: int = Field(default=100, gt=0)
     min_existing_features_threshold: int = Field(default=10, gt=0)
     min_existing_labels_threshold: int = Field(default=50, gt=0)
+
+    # Time interval configurations for data availability checks
+    historical_data_availability_days: int = Field(default=7, gt=0)
+    aggregation_data_availability_days: int = Field(default=7, gt=0)
+    features_data_availability_days: int = Field(default=3, gt=0)
+    labeling_data_availability_days: int = Field(default=5, gt=0)
+    existing_features_availability_days: int = Field(default=2, gt=0)
+    existing_labels_availability_days: int = Field(default=3, gt=0)
+
+
+class DataResetConfig(StrictBaseModel):
+    """Configuration for database table truncation when TRUNCATE_ALL_DATA=true."""
+
+    # Category-based truncation controls
+    truncate_ohlcv_tables: bool = Field(default=True)
+    truncate_feature_tables: bool = Field(default=True)
+    truncate_ml_tables: bool = Field(default=True)
+    truncate_state_tables: bool = Field(default=True)
+    truncate_aggregation_tables: bool = Field(default=True)
+    truncate_statistics_tables: bool = Field(default=True)
+
+    # Specific table configuration (overrides category settings)
+    tables: dict[str, bool] = Field(
+        default_factory=lambda: {
+            # OHLCV Data Tables (TimescaleDB Hypertables)
+            "ohlcv_1min": True,
+            "ohlcv_5min": True,
+            "ohlcv_15min": True,
+            "ohlcv_60min": True,
+            # Feature Engineering Tables
+            "features": True,
+            "engineered_features": True,
+            "feature_scores": True,
+            "feature_selection_history": True,
+            "feature_lineage": True,
+            "feature_performance_metrics": False,  # VIEW - cannot truncate
+            "current_selected_features": False,  # VIEW - cannot truncate
+            "cross_asset_features": True,
+            # Machine Learning Tables
+            "labels": True,
+            "signals": True,
+            "model_registry": True,
+            "labeling_statistics": True,
+            # State Management Tables
+            "processing_state": True,
+            "data_ranges": True,
+            "system_operations_state": True,
+            # Aggregation and Analytics Tables
+            "daily_ohlcv_agg": True,
+            "hourly_feature_agg": True,
+            "daily_signal_performance": True,
+            # System Tables (usually keep these)
+            "instruments": False,
+            "schema_migrations": False,
+        }
+    )
 
 
 class AppConfig(StrictBaseModel):
@@ -685,6 +728,7 @@ class AppConfig(StrictBaseModel):
     metrics: Optional[MetricsConfig] = None
     auth_server: Optional[AuthServerConfig] = None
     processing_control: Optional[ProcessingControlConfig] = None
+    data_reset: Optional[DataResetConfig] = None
     api: Optional[APIConfig] = None
 
 
@@ -699,6 +743,7 @@ class QueriesConfig(StrictBaseModel):
     signal_repo: dict[str, str]
     label_stats_repo: dict[str, str]
     processing_state_repo: dict[str, str]
+    data_reset_repo: dict[str, str]
 
 
 class ConfigLoader:

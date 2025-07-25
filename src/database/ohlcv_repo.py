@@ -1,6 +1,8 @@
 from datetime import datetime
 from typing import Optional
 
+import pytz
+
 from src.database.db_utils import db_manager
 from src.database.models import OHLCVData
 from src.utils.config_loader import ConfigLoader
@@ -24,7 +26,25 @@ class OHLCVRepository:
 
         self._table_map = {f"{tf}min": f"ohlcv_{tf}min" for tf in config.trading.aggregation_timeframes}
         self._table_map["1min"] = "ohlcv_1min"  # Ensure base timeframe is always present
+        # Set up timezone for consistent datetime handling
+        self.timezone = pytz.timezone(config.system.timezone)
         logger.info(f"OHLCVRepository initialized with table map: {self._table_map}")
+
+    def _normalize_datetime(self, dt: datetime) -> datetime:
+        """
+        Normalize datetime to be timezone-aware using system timezone.
+
+        Args:
+            dt: DateTime object (timezone-aware or naive)
+
+        Returns:
+            Timezone-aware datetime object
+        """
+        if dt.tzinfo is None:
+            # If timezone-naive, assume it's in system timezone
+            return self.timezone.localize(dt)
+        # If already timezone-aware, convert to system timezone
+        return dt.astimezone(self.timezone)
 
     def _get_table_name(self, timeframe: str) -> str:
         """
@@ -181,49 +201,6 @@ class OHLCVRepository:
             logger.error(f"Database error getting data range for {instrument_id} ({timeframe}): {e}", exc_info=True)
             raise RuntimeError("Failed to get data range.") from e
 
-    async def find_data_gaps(
-        self, instrument_id: int, timeframe: str, start_date: datetime, end_date: datetime
-    ) -> list[tuple[datetime, datetime]]:
-        """
-        Find gaps in existing data that need to be filled.
-
-        Returns:
-            A list of (gap_start, gap_end) tuples representing missing data periods.
-
-        Raises:
-            RuntimeError: If the database query fails.
-        """
-        table_name = self._get_table_name(timeframe)
-        logger.info(f"Finding data gaps for instrument {instrument_id} ({timeframe}) from {start_date} to {end_date}.")
-        try:
-            interval_minutes = int(timeframe.replace("min", ""))
-            query = queries.ohlcv_repo["find_data_gaps"].format(
-                table_name=table_name,
-                interval_minutes=interval_minutes,
-                interval_minutes_threshold=interval_minutes * 1.5,
-            )
-
-            rows = await self.db_manager.fetch_rows(query, instrument_id, start_date, end_date)
-            gaps = [(row["gap_start"], row["gap_end"]) for row in rows]
-
-            existing_data = await self.get_ohlcv_data(instrument_id, timeframe, start_date, end_date)
-            if existing_data:
-                first_candle_time = min(candle.ts for candle in existing_data)
-                if first_candle_time > start_date:
-                    gaps.insert(0, (start_date, first_candle_time))
-
-                last_candle_time = max(candle.ts for candle in existing_data)
-                if last_candle_time < end_date:
-                    gaps.append((last_candle_time, end_date))
-            else:
-                gaps = [(start_date, end_date)]
-
-            logger.info(f"Found {len(gaps)} data gaps for instrument {instrument_id} ({timeframe}).")
-            return gaps
-        except Exception as e:
-            logger.error(f"Database error finding data gaps for {instrument_id} ({timeframe}): {e}", exc_info=True)
-            raise RuntimeError("Failed to find data gaps.") from e
-
     async def get_last_successful_fetch(self, instrument_id: int) -> Optional[datetime]:
         """
         Get timestamp of last successful data fetch for an instrument.
@@ -260,6 +237,10 @@ class OHLCVRepository:
 
         end_time = datetime.now()
         start_time = end_time - timedelta(hours=lookback_hours)
+
+        # Normalize datetimes to ensure timezone consistency
+        end_time = self._normalize_datetime(end_time)
+        start_time = self._normalize_datetime(start_time)
         logger.debug(
             f"Checking for {required_candles} candles for instrument {instrument_id} ({timeframe}) in the last {lookback_hours} hours."
         )

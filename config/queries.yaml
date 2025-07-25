@@ -257,17 +257,29 @@ label_stats_repo:
 
 processing_state_repo:
   insert_processing_state: |
-    INSERT INTO processing_state (instrument_id, process_type, completed_at, metadata)
-    VALUES ($1, $2, $3, $4)
+    INSERT INTO processing_state (instrument_id, process_type, completed_at, metadata, status)
+    VALUES ($1, $2, $3, $4, $5)
     ON CONFLICT (instrument_id, process_type)
     DO UPDATE SET
         completed_at = EXCLUDED.completed_at,
-        metadata = EXCLUDED.metadata
+        metadata = EXCLUDED.metadata,
+        status = EXCLUDED.status
   check_processing_complete: |
     SELECT EXISTS(
         SELECT 1 FROM processing_state 
-        WHERE instrument_id = $1 AND process_type = $2
+        WHERE instrument_id = $1 AND process_type = $2 AND status = 'completed'
     )
+  check_processing_failed: |
+    SELECT EXISTS(
+        SELECT 1 FROM processing_state 
+        WHERE instrument_id = $1 AND process_type = $2 AND status = 'failed'
+    )
+  get_processing_status: |
+    SELECT status, completed_at, metadata
+    FROM processing_state
+    WHERE instrument_id = $1 AND process_type = $2
+    ORDER BY completed_at DESC
+    LIMIT 1
   get_last_processing_timestamp: |
     SELECT completed_at
     FROM processing_state
@@ -280,6 +292,23 @@ processing_state_repo:
     WHERE instrument_id = $1
   delete_all_processing_state: |
     DELETE FROM processing_state
+  
+  # System operations queries
+  check_system_operation_complete: |
+    SELECT COUNT(*) > 0 
+    FROM system_operations_state 
+    WHERE operation_type = $1 AND status = 'completed'
+  
+  upsert_system_operation: |
+    INSERT INTO system_operations_state (operation_type, completed_at, metadata, status, updated_at)
+    VALUES ($1, $2, $3, $4, $5)
+    ON CONFLICT (operation_type) 
+    DO UPDATE SET 
+      completed_at = EXCLUDED.completed_at,
+      metadata = EXCLUDED.metadata,
+      status = EXCLUDED.status,
+      updated_at = EXCLUDED.updated_at
+  
   get_processing_summary: |
     SELECT instrument_id, process_type, completed_at
     FROM processing_state
@@ -351,38 +380,46 @@ processing_state_repo:
     SELECT COUNT(*) as count FROM labels
     WHERE instrument_id = $1
     AND ts >= NOW() - INTERVAL '{lookback_days} days'
-  has_actual_data_historical: |
+  has_actual_data_historical_fetch: |
     SELECT COUNT(*) as count FROM ohlcv_1min
     WHERE instrument_id = $1
-    AND ts >= NOW() - INTERVAL '7 days'
+    AND ts >= NOW() - INTERVAL '{historical_data_availability_days} days'
   has_actual_data_aggregation: |
     SELECT COUNT(*) as count FROM ohlcv_1min
     WHERE instrument_id = $1
-    AND ts >= NOW() - INTERVAL '7 days'
+    AND ts >= NOW() - INTERVAL '{aggregation_data_availability_days} days'
+  has_actual_data_features: |
+    SELECT COUNT(*) as count FROM ohlcv_{timeframe}min
+    WHERE instrument_id = $1
+    AND ts >= NOW() - INTERVAL '{features_data_availability_days} days'
+  has_actual_data_labeling: |
+    SELECT COUNT(*) as count FROM ohlcv_{timeframe}min
+    WHERE instrument_id = $1
+    AND ts >= NOW() - INTERVAL '{labeling_data_availability_days} days'
   has_actual_data_aggregated_timeframe: |
     SELECT COUNT(*) as count FROM ohlcv_{timeframe}min
     WHERE instrument_id = $1
-    AND ts >= NOW() - INTERVAL '3 days'
+    AND ts >= NOW() - INTERVAL '{features_data_availability_days} days'
   has_actual_data_features_timeframe: |
     SELECT COUNT(*) as count FROM ohlcv_{timeframe}min
     WHERE instrument_id = $1
-    AND ts >= NOW() - INTERVAL '3 days'
+    AND ts >= NOW() - INTERVAL '{features_data_availability_days} days'
   has_actual_data_existing_features: |
     SELECT COUNT(DISTINCT ts) as count FROM features
     WHERE instrument_id = $1
-    AND ts >= NOW() - INTERVAL '2 days'
+    AND ts >= NOW() - INTERVAL '{existing_features_availability_days} days'
   has_actual_data_labeling_ohlcv: |
     SELECT COUNT(*) as count FROM ohlcv_{timeframe}min
     WHERE instrument_id = $1
-    AND ts >= NOW() - INTERVAL '5 days'
+    AND ts >= NOW() - INTERVAL '{labeling_data_availability_days} days'
   has_actual_data_labeling_features: |
     SELECT COUNT(DISTINCT ts) as count FROM features
     WHERE instrument_id = $1 AND timeframe = $2
-    AND ts >= NOW() - INTERVAL '5 days'
+    AND ts >= NOW() - INTERVAL '{labeling_data_availability_days} days'
   has_actual_data_existing_labels: |
     SELECT COUNT(*) as count FROM labels
     WHERE instrument_id = $1
-    AND ts >= NOW() - INTERVAL '3 days'
+    AND ts >= NOW() - INTERVAL '{existing_labels_availability_days} days'
 
 ohlcv_repo:
   insert_ohlcv_data: |
@@ -403,27 +440,23 @@ ohlcv_repo:
     SELECT MIN(ts) as earliest_ts, MAX(ts) as latest_ts
     FROM {table_name}
     WHERE instrument_id = $1
-  find_data_gaps: |
-    WITH data_with_gaps AS (
-        SELECT
-            ts,
-            LAG(ts) OVER (ORDER BY ts) as prev_ts,
-            EXTRACT(EPOCH FROM (ts - LAG(ts) OVER (ORDER BY ts))) / 60 as gap_minutes
-        FROM {table_name}
-        WHERE instrument_id = $1
-        AND ts BETWEEN $2 AND $3
-        ORDER BY ts
-    ),
-    gaps AS (
-        SELECT
-            prev_ts + INTERVAL '{interval_minutes} minutes' as gap_start,
-            ts - INTERVAL '{interval_minutes} minutes' as gap_end
-        FROM data_with_gaps
-        WHERE gap_minutes > {interval_minutes_threshold}
-    )
-    SELECT gap_start, gap_end FROM gaps
-    ORDER BY gap_start
   get_data_range_for_instrument: |
     SELECT MIN(ts) as earliest_ts, MAX(ts) as latest_ts
     FROM {table_name}
     WHERE instrument_id = $1
+
+data_reset_repo:
+  check_table_exists: |
+    SELECT EXISTS (
+      SELECT 1 FROM information_schema.tables 
+      WHERE table_schema = 'public' AND table_name = $1
+    )
+  truncate_table: |
+    TRUNCATE TABLE {table_name} CASCADE
+  get_all_tables: |
+    SELECT table_name 
+    FROM information_schema.tables 
+    WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
+    ORDER BY table_name
+  get_table_row_count: |
+    SELECT COUNT(*) as row_count FROM {table_name}

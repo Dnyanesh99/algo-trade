@@ -618,14 +618,20 @@ class OptimizedTripleBarrierLabeler:
         return LabelingResult(*results_tuple)
 
     async def _calculate_and_store_results(
-        self, symbol: str, timeframe: str, original_df: pd.DataFrame, labeled_df: pd.DataFrame, start_time: datetime
+        self,
+        instrument_id: int,
+        symbol: str,
+        timeframe: str,
+        original_df: pd.DataFrame,
+        labeled_df: pd.DataFrame,
+        start_time: datetime,
     ) -> LabelingStats:
         logger.debug(f"Calculating and storing results for {symbol} ({timeframe}).")
         stats = self._calculate_statistics(symbol, original_df, labeled_df, start_time, timeframe)
 
         if not labeled_df.empty:
             labels_to_insert = [LabelData(**row) for row in labeled_df.to_dict("records")]
-            await self.label_repo.insert_labels(labeled_df.iloc[0]["instrument_id"], labels_to_insert)
+            await self.label_repo.insert_labels(instrument_id, labels_to_insert)
             logger.info(f"Stored {len(labels_to_insert)} labels for {symbol} in {stats.processing_time_ms:.2f}ms.")
 
             stats_data = LabelingStatsData(**stats.__dict__)
@@ -674,7 +680,9 @@ class OptimizedTripleBarrierLabeler:
                 )
                 return None
 
-            return await self._calculate_and_store_results(symbol, timeframe, df_sorted, labeled_df, start_time)
+            return await self._calculate_and_store_results(
+                instrument_id, symbol, timeframe, df_sorted, labeled_df, start_time
+            )
 
         except Exception as e:
             logger.error(f"A critical error occurred while processing {symbol}: {e}", exc_info=True)

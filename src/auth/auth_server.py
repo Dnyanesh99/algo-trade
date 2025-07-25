@@ -1,8 +1,9 @@
 import os
 import threading
+import time
 import webbrowser
 from datetime import datetime
-from typing import Optional, Union
+from typing import Any, Optional, Union
 from urllib.parse import urlparse
 
 from flask import Flask, Response, jsonify, render_template, request
@@ -202,30 +203,55 @@ def auth_callback() -> str:
             raise RuntimeError("CRITICAL: System components not initialized for callback.")
 
         logger.info("About to call authenticate() with request token")
-        access_token, refresh_token = global_authenticator_instance.authenticate(request_token)
-        logger.info(f"Authentication successful. Got access_token: {'Yes' if access_token else 'No'}, refresh_token: {'Yes' if refresh_token else 'No'}")
-        
-        logger.info("About to call set_tokens()")
-        try:
-            global_token_manager_instance.set_tokens(access_token, refresh_token)
-            logger.info("set_tokens() completed successfully")
-        except Exception as token_error:
-            logger.critical(f"CRITICAL ERROR in set_tokens(): {token_error}", exc_info=True)
-            raise
+        access_token = global_authenticator_instance.authenticate(request_token)
+        logger.info(f"Authentication successful. Got access_token: {'Yes' if access_token else 'No'}")
 
+        logger.info("About to call set_token()")
         try:
-            auth_result = {"success": True, "message": "Authentication successful!"}
-            logger.info("Authentication flow completed successfully. Setting success event.")
-            auth_success_event.set()
-            logger.info("Success event has been set!")
-        except Exception as event_error:
-            logger.critical(f"CRITICAL ERROR setting success event: {event_error}", exc_info=True)
-            raise
+            # Add timeout protection for set_token call
+            import signal
+
+            def timeout_handler(signum: int, frame: Optional[Any]) -> None:
+                raise TimeoutError("set_token() operation timed out after 10 seconds")
+
+            # Set up timeout for set_token call
+            signal.signal(signal.SIGALRM, timeout_handler)
+            signal.alarm(10)  # 10 second timeout
+
+            try:
+                global_token_manager_instance.set_token(access_token)
+                logger.info("set_token() completed successfully")
+            finally:
+                signal.alarm(0)  # Cancel the alarm
+
+        except TimeoutError as timeout_error:
+            logger.critical(f"TIMEOUT ERROR in set_token(): {timeout_error}", exc_info=True)
+            auth_error_event.set()
+            return render_template(
+                "auth_error.html",
+                error_type="TIMEOUT",
+                error_message="Token saving operation timed out. Please try again.",
+                request_token=request_token,
+            )
+        except Exception as token_error:
+            logger.critical(f"CRITICAL ERROR in set_token(): {token_error}", exc_info=True)
+            auth_error_event.set()
+            return render_template(
+                "auth_error.html",
+                error_type="TOKEN_SAVE_ERROR",
+                error_message=str(token_error),
+                request_token=request_token,
+            )
+
+        # Set the success event immediately after token is saved
+        logger.info("Setting auth_success_event...")
+        auth_success_event.set()
+        logger.info("Authentication flow completed successfully. Success event has been set!")
 
         token_preview = f"{access_token[:10]}..." if len(access_token) > 10 else access_token
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         return render_template(
-            "auth_success.html", token_preview=token_preview, timestamp=timestamp, auto_close_seconds=10
+            "auth_success.html", token_preview=token_preview, timestamp=timestamp, auto_close_seconds=5
         )
 
     except (RuntimeError, ValueError) as e:
@@ -318,21 +344,31 @@ def start_auth_server_and_wait(broker_config: BrokerConfig, auth_server_config: 
     try:
         timeout = auth_server_config.timeout_seconds
         logger.info(f"Waiting for authentication to complete. Timeout is set to {timeout} seconds.")
-        auth_completed_event = auth_success_event.wait(timeout=timeout)
 
-        if not auth_completed_event and not auth_error_event.is_set():
-            logger.error(f"Authentication timed out after {timeout} seconds. No success or error event received.")
-            auth_result.update({"success": False, "message": "Authentication timed out."})
+        # Wait for either success or error event
+        while timeout > 0:
+            if auth_success_event.is_set():
+                logger.info("Authentication completed successfully!")
+                # Ensure server is shut down before returning
+                if server:
+                    server.shutdown()
+                    server.join(timeout=5)
+                    if server.is_alive():
+                        logger.warning("Server thread did not shut down gracefully.")
+                return True
+            if auth_error_event.is_set():
+                logger.error("Authentication failed with error.")
+                return False
+            time.sleep(1)  # Using time.sleep instead of await asyncio.sleep
+            timeout -= 1
+
+        logger.error(f"Authentication timed out after {auth_server_config.timeout_seconds} seconds.")
+        return False
 
     finally:
-        logger.info("Authentication process finished or timed out. Shutting down the web server.")
-        if server:
+        logger.info("Authentication process finished. Shutting down the web server.")
+        if server and server.is_alive():
             server.shutdown()
             server.join(timeout=5)
             if server.is_alive():
                 logger.warning("Server thread did not shut down gracefully.")
-
-    logger.info(
-        f"Final authentication result: Success={auth_result.get('success')}, Message='{auth_result.get('message')}'"
-    )
-    return bool(auth_result.get("success"))

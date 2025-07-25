@@ -167,7 +167,7 @@ if __name__ == "__main__":
     from src.utils.config_loader import ConfigLoader
 
     config = ConfigLoader().get_config()
-    host = config.api.host if hasattr(config, "api") and hasattr(config.api, "host") else "127.0.0.1"
+    host = config.api.host if config.api is not None else "127.0.0.1"
 
     uvicorn.run(
         "src.api.main:app",

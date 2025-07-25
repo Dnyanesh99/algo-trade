@@ -114,7 +114,7 @@ async def start_server() -> None:
 
         config_loader = ConfigLoader()
         api_config = config_loader.get_config()
-        host = api_config.api.host if hasattr(api_config, "api") and hasattr(api_config.api, "host") else "127.0.0.1"
+        host = api_config.api.host if api_config.api is not None else "127.0.0.1"
 
         # Configuration
         config = uvicorn.Config(

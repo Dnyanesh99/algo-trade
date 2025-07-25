@@ -13,6 +13,9 @@ class KiteAuthenticator:
     """
     Manages the authentication flow with Zerodha KiteConnect API.
     Handles initial login, request token exchange for access token.
+
+    Note: Zerodha Kite Connect deliberately does not provide refresh tokens.
+    Access tokens are valid only for the trading day and expire around 07:00-07:30 AM IST.
     """
 
     def __init__(self, broker_config: BrokerConfig) -> None:
@@ -60,16 +63,16 @@ class KiteAuthenticator:
             logger.critical(f"Failed to generate login URL: {e}", exc_info=True)
             raise RuntimeError("Could not generate KiteConnect login URL.") from e
 
-    def authenticate(self, request_token: str) -> tuple[str, str]:
+    def authenticate(self, request_token: str) -> str:
         """
-        Main authentication method. Exchanges a request token for access and refresh tokens.
+        Main authentication method. Exchanges a request token for an access token.
         This is a critical step in the OAuth flow.
 
         Args:
             request_token: The token received from the broker after user login.
 
         Returns:
-            A tuple containing the access_token and refresh_token.
+            The access token.
 
         Raises:
             ValueError: If the request_token is empty or invalid.
@@ -89,30 +92,18 @@ class KiteAuthenticator:
             duration = time.monotonic() - start_time
 
             access_token = data.get("access_token")
-            refresh_token = data.get("refresh_token")
 
             if not access_token:
-                logger.critical(
-                    f"Authentication response from broker is missing access_token. Response: {data}"
-                )
+                logger.critical(f"Authentication response from broker is missing access_token. Response: {data}")
                 metrics_registry.record_auth_request("generate_session", False, duration)
                 raise RuntimeError("Invalid token data received from broker.")
-            
-            if not refresh_token:
-                logger.warning(
-                    f"No refresh token provided by broker. Only access token will be available. This may require re-authentication when token expires."
-                )
+
+            # Note: Zerodha deliberately returns an empty string for refresh_token
+            # We don't need to check for it or handle it
 
             metrics_registry.record_auth_request("generate_session", True, duration)
-            if refresh_token:
-                logger.info(
-                    f"Successfully generated session in {duration:.2f} seconds. Received access and refresh tokens."
-                )
-            else:
-                logger.info(
-                    f"Successfully generated session in {duration:.2f} seconds. Received access token only."
-                )
-            return access_token, refresh_token
+            logger.info(f"Successfully generated session in {duration:.2f} seconds. Received access token.")
+            return str(access_token)
 
         except (TokenException, NetworkException, KiteException) as e:
             duration = time.monotonic() - start_time

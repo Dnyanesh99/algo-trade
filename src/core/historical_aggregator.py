@@ -213,16 +213,42 @@ class HistoricalAggregator:
         logger.info(f"Aggregating to {timeframe_str} for instrument {instrument_id}.")
 
         try:
+            # DEBUG: Add detailed logging about the prepared data
+            logger.debug(f"DEBUG: Prepared data for {timeframe_str} aggregation:")
+            logger.debug(f"  - Shape: {df_prepared.shape}")
+            logger.debug(f"  - Index type: {type(df_prepared.index)}, dtype: {df_prepared.index.dtype}")
+            logger.debug(f"  - Columns: {df_prepared.columns.tolist()}")
+            logger.debug(f"  - First 3 timestamps: {df_prepared.index[:3].tolist()}")
+            logger.debug(f"  - Last 3 timestamps: {df_prepared.index[-3:].tolist()}")
+
+            # Check for data quality issues
+            for col in ["open", "high", "low", "close", "volume"]:
+                if col in df_prepared.columns:
+                    null_count = df_prepared[col].isnull().sum()
+                    inf_count = (df_prepared[col] == float("inf")).sum() + (df_prepared[col] == float("-inf")).sum()
+                    logger.debug(f"  - {col}: {null_count} nulls, {inf_count} infinite values")
+
             agg_dict = {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
             if "oi" in df_prepared.columns:
                 agg_dict["oi"] = "last"
 
-            aggregated_df = df_prepared.resample(timeframe_str).agg(agg_dict).dropna()
+            # DEBUG: Test resample without dropna first
+            resampled = df_prepared.resample(timeframe_str).agg(agg_dict)
+            logger.debug(f"DEBUG: After resample (before dropna): shape={resampled.shape}")
+            logger.debug(f"DEBUG: Null rows in resampled: {resampled.isnull().all(axis=1).sum()}")
+
+            # For indices, volume and OI might be zero or NaN, but we still want to keep the price data
+            # Only drop rows where all required price columns (open, high, low, close) are NaN
+            required_columns = ["open", "high", "low", "close"]
+            aggregated_df = resampled.dropna(subset=required_columns, how="all")
+            logger.debug(f"DEBUG: After dropna(subset={required_columns}, how='all'): shape={aggregated_df.shape}")
 
             if aggregated_df.empty:
                 logger.warning(
                     f"No data generated after aggregating to {timeframe_str} for instrument {instrument_id}."
                 )
+                # DEBUG: Log first few rows of resampled data to understand why it's empty
+                logger.debug(f"DEBUG: Resampled data (first 5 rows):\n{resampled.head()}")
                 return self._create_failure_result(
                     instrument_id, timeframe_str, tf_start_time, ["Aggregation resulted in empty dataframe."]
                 )

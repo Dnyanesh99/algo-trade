@@ -124,27 +124,109 @@ class CandleValidator(IValidator):
             raise ConfigurationError("Quality score threshold must be between 0 and 100")
 
     def validate(self, df: pd.DataFrame, **kwargs: Any) -> tuple[bool, pd.DataFrame, DataQualityReport]:
+        """
+        Validate data with comprehensive logging of the validation process.
+        """
         context = ValidationContext(df, self.config, **kwargs)
         try:
             if context.df.empty:
                 context.metrics.issues.append("No data to validate")
                 return False, context.df, self._generate_report(context)
 
+            logger.info(f"Starting validation for {context.symbol} ({context.instrument_type})")
+            logger.info(f"Initial data shape: {context.df.shape}")
+            logger.info(f"Required columns: {self.config.validation.required_columns}")
+
+            # Log data sample before validation
+            logger.debug(f"Data sample before validation:\n{context.df.head(2)}")
+
+            # Run validation pipeline with detailed logging
             self._run_validation_pipeline(context)
+
+            # Calculate and log quality score
             is_valid = self._is_data_valid(context)
+            quality_score = self._calculate_quality_score(context)
+
+            logger.info(
+                f"Validation complete for {context.symbol}:\n"
+                f"- Final data shape: {context.df.shape}\n"
+                f"- Quality Score: {quality_score:.2f}\n"
+                f"- Validation Result: {'✅ PASS' if is_valid else '❌ FAIL'}\n"
+                f"- Issues Found: {len(context.metrics.issues)}"
+            )
+
+            if context.metrics.issues:
+                logger.debug("Validation issues:\n" + "\n".join(f"- {issue}" for issue in context.metrics.issues))
+
             self._log_validation_results(context, is_valid)
             return is_valid, context.df, self._generate_report(context)
+
         except Exception as e:
-            raise RuntimeError(
-                f"🚨 CRITICAL VALIDATION FAILURE: Validation failed for {context.symbol}: {e} - Data validation system completely broken"
-            ) from e
+            logger.error(f"🚨 Validation failed for {context.symbol} with error: {str(e)}", exc_info=True)
+            raise RuntimeError(f"🚨 CRITICAL VALIDATION FAILURE: Validation failed for {context.symbol}: {e}") from e
 
     def _run_validation_pipeline(self, context: ValidationContext) -> None:
+        """
+        Run the validation pipeline with detailed logging of each step.
+        """
+        logger.info(f"Starting validation pipeline for {context.symbol}")
+
+        # Step 1: Prepare and clean data
+        logger.info("Step 1: Data preparation and cleaning")
+        rows_before = len(context.df)
         self._prepare_and_clean_data(context)
+        rows_after = len(context.df)
+        logger.info(
+            f"Data cleaning results:\n"
+            f"- Initial rows: {rows_before}\n"
+            f"- Rows after cleaning: {rows_after}\n"
+            f"- Rows removed: {rows_before - rows_after}\n"
+            f"- Retention rate: {(rows_after / rows_before * 100):.2f}%"
+        )
+
+        # Step 2: OHLC violations check
+        logger.info("Step 2: Checking OHLC violations")
+        violations_before = context.metrics.ohlc_violations
         self._correct_ohlc_violations(context)
+        logger.info(
+            f"OHLC validation results:\n"
+            f"- Violations found: {context.metrics.ohlc_violations}\n"
+            f"- Violations corrected: {context.metrics.ohlc_violations - violations_before}"
+        )
+
+        # Step 3: Remove duplicates
+        logger.info("Step 3: Checking for duplicates")
         self._remove_duplicates(context)
+        logger.info(f"Duplicates found and removed: {context.metrics.duplicates}")
+
+        # Step 4: Time gap detection
+        logger.info("Step 4: Detecting time gaps")
         self._detect_time_gaps(context)
+        logger.info(f"Time gaps detected: {context.metrics.time_gaps}")
+
+        # Step 5: Outlier detection
+        logger.info("Step 5: Outlier detection")
         self._handle_outliers(context)
+        if context.metrics.outliers:
+            logger.info(
+                "Outliers detected:\n"
+                + "\n".join(f"- {col}: {count} outliers" for col, count in context.metrics.outliers.items())
+            )
+        else:
+            logger.info("No outliers detected")
+
+        # Log final validation metrics
+        logger.info(
+            f"Validation pipeline complete for {context.symbol}:\n"
+            f"Final Metrics:\n"
+            f"- Rows processed: {context.metrics.initial_rows}\n"
+            f"- Rows retained: {len(context.df)}\n"
+            f"- Data retention: {(len(context.df) / context.metrics.initial_rows * 100):.2f}%\n"
+            f"- OHLC violations: {context.metrics.ohlc_violations}\n"
+            f"- Duplicates: {context.metrics.duplicates}\n"
+            f"- Time gaps: {context.metrics.time_gaps}\n"
+            f"- Total issues: {len(context.metrics.issues)}"
+        )
 
     def _prepare_and_clean_data(self, context: ValidationContext) -> None:
         ts_col = next((c for c in TIMESTAMP_COLUMNS if c in context.df.columns), None)
@@ -226,32 +308,98 @@ class CandleValidator(IValidator):
         context.metrics.time_gaps = gaps
 
     def _handle_outliers(self, context: ValidationContext) -> None:
-        # Only check for outliers in columns that are both required and suitable for outlier detection
-        potential_outlier_cols = PRICE_COLUMNS + ["volume", "oi"]
+        """
+        Handle outliers only for required columns that are suitable for outlier detection.
+        For indices, this typically means only OHLC columns.
+        """
         required_cols = self.config.validation.required_columns
-        outlier_cols = [col for col in potential_outlier_cols if col in required_cols]
+
+        # Only check outliers in required columns that are numeric
+        numeric_cols = context.df.select_dtypes(include=["float64", "int64"]).columns
+        outlier_cols = [col for col in required_cols if col in numeric_cols]
 
         if outlier_cols:
-            context.df, context.metrics.outliers = self.outlier_detector.detect_and_handle(
+            # Log which columns we're checking for outliers
+            logger.debug(f"Checking outliers for {context.symbol} in columns: {outlier_cols}")
+
+            context.df, detected_outliers = self.outlier_detector.detect_and_handle(
                 context.df, outlier_cols, self.config, context.metrics.issues
             )
+
+            # Only store outliers for required columns
+            context.metrics.outliers = {col: count for col, count in detected_outliers.items() if col in required_cols}
+
+            if context.metrics.outliers:
+                logger.debug(
+                    f"Found outliers in {context.symbol}: "
+                    f"{', '.join(f'{k}: {v}' for k, v in context.metrics.outliers.items())}"
+                )
         else:
             context.metrics.outliers = {}
-            context.metrics.issues.append("No suitable columns found for outlier detection")
+            context.metrics.issues.append(
+                f"No suitable columns found for outlier detection among required columns: {required_cols}"
+            )
 
     def _calculate_quality_score(self, context: ValidationContext) -> float:
+        """
+        Calculate quality score based only on required columns and their validations.
+
+        The score is calculated as:
+        1. Base score: Percentage of rows retained after cleaning
+        2. Penalties applied only for required columns:
+           - Outliers in required columns
+           - Time gaps (always checked as it's timestamp-based)
+           - OHLC violations (only for required price columns)
+           - Duplicates (always checked as it's timestamp-based)
+        """
         m = context.metrics
         if m.initial_rows == 0:
             return 0.0
+
+        required_cols = self.config.validation.required_columns
         penalties = self.config.penalties
+
+        # Base score - percentage of rows retained after cleaning
         base_score = len(context.df) / m.initial_rows
-        penalty_factor = (
-            (1 - (sum(m.outliers.values()) / len(context.df)) * penalties.outlier_penalty if len(context.df) > 0 else 1)
-            * (1 - (m.time_gaps / len(context.df)) * penalties.gap_penalty if len(context.df) > 0 else 1)
-            * (1 - (m.ohlc_violations / m.initial_rows) * penalties.ohlc_violation_penalty)
-            * (1 - (m.duplicates / m.initial_rows) * penalties.duplicate_penalty)
+
+        # Calculate outlier penalty only for required columns
+        required_outliers = {col: count for col, count in m.outliers.items() if col in required_cols}
+
+        # Calculate individual penalty components
+        if required_outliers and len(context.df) > 0:
+            outlier_penalty = 1 - ((sum(required_outliers.values()) / len(context.df)) * penalties.outlier_penalty)
+        else:
+            outlier_penalty = 1.0
+
+        gap_penalty = 1 - m.time_gaps / len(context.df) * penalties.gap_penalty if len(context.df) > 0 else 1.0
+
+        # OHLC violations penalty - only for required price columns
+        required_price_cols = [col for col in PRICE_COLUMNS if col in required_cols]
+        if required_price_cols:
+            ohlc_penalty = 1 - ((m.ohlc_violations / m.initial_rows) * penalties.ohlc_violation_penalty)
+        else:
+            ohlc_penalty = 1.0
+
+        # Duplicate penalty (always applied as it's timestamp-based)
+        duplicate_penalty = 1 - ((m.duplicates / m.initial_rows) * penalties.duplicate_penalty)
+
+        # Calculate final penalty factor
+        penalty_factor = outlier_penalty * gap_penalty * ohlc_penalty * duplicate_penalty
+
+        quality_score = max(0.0, base_score * penalty_factor * 100)
+
+        # Log detailed score components for debugging
+        logger.debug(
+            f"Quality score components for {context.symbol}:\n"
+            f"Base score: {base_score:.3f}\n"
+            f"Outlier penalty (required cols only): {outlier_penalty:.3f}\n"
+            f"Gap penalty: {gap_penalty:.3f}\n"
+            f"OHLC penalty (required cols only): {ohlc_penalty:.3f}\n"
+            f"Duplicate penalty: {duplicate_penalty:.3f}\n"
+            f"Final score: {quality_score:.2f}"
         )
-        return max(0.0, base_score * penalty_factor * 100)
+
+        return quality_score
 
     def _is_data_valid(self, context: ValidationContext) -> bool:
         return (
@@ -260,8 +408,13 @@ class CandleValidator(IValidator):
         )
 
     def _generate_report(self, context: ValidationContext) -> DataQualityReport:
+        """
+        Generate a detailed data quality report with comprehensive logging.
+        """
         m = context.metrics
-        return DataQualityReport(
+        quality_score = self._calculate_quality_score(context)
+
+        report = DataQualityReport(
             m.initial_rows,
             len(context.df),
             m.nan_counts,
@@ -269,12 +422,41 @@ class CandleValidator(IValidator):
             m.duplicates,
             m.time_gaps,
             m.outliers,
-            self._calculate_quality_score(context),
+            quality_score,
             m.issues,
         )
 
+        # Log detailed quality report
+        logger.info(
+            f"\n{'=' * 50}\n"
+            f"DATA QUALITY REPORT: {context.symbol}\n"
+            f"{'=' * 50}\n"
+            f"Instrument Type: {context.instrument_type}\n"
+            f"Quality Score: {quality_score:.2f}\n"
+            f"\nData Volume Metrics:\n"
+            f"- Initial rows: {m.initial_rows}\n"
+            f"- Final rows: {len(context.df)}\n"
+            f"- Data retention: {(len(context.df) / m.initial_rows * 100 if m.initial_rows > 0 else 0):.2f}%\n"
+            f"\nData Quality Metrics:\n"
+            f"- OHLC violations: {m.ohlc_violations}\n"
+            f"- Duplicate timestamps: {m.duplicates}\n"
+            f"- Time gaps detected: {m.time_gaps}\n"
+            f"- Total outliers: {sum(m.outliers.values())}\n"
+            f"\nMissing Data (NaN) by Column:\n"
+            + "\n".join(f"- {col}: {count}" for col, count in m.nan_counts.items())
+            + "\n\nOutliers by Column:\n"
+            + "\n".join(f"- {col}: {count}" for col, count in m.outliers.items())
+            + "\n\nValidation Issues:\n"
+            + "\n".join(f"- {issue}" for issue in m.issues)
+            + f"\n{'=' * 50}"
+        )
+
+        return report
+
     def _log_validation_results(self, context: ValidationContext, is_valid: bool) -> None:
         if not is_valid:
-            raise RuntimeError(
-                f"🚨 CRITICAL QUALITY FAILURE: Data quality for {context.symbol} below threshold ({len(context.metrics.issues)} total issues): {context.metrics.issues[:3]} - Data integrity compromised, cannot proceed with trading"
+            logger.error(
+                f"🚨 QUALITY CHECK FAILED: Data quality for {context.symbol} below threshold ({len(context.metrics.issues)} total issues): {context.metrics.issues[:3]}"
             )
+        else:
+            logger.info(f"✅ Data quality check passed for {context.symbol} with {len(context.df)} valid rows")

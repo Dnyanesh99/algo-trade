@@ -3,10 +3,8 @@ import asyncio
 import importlib
 import importlib.util
 import os
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any, Optional
-
-import pandas as pd
 
 from src.auth.auth_server import start_auth_server_and_wait
 from src.auth.token_manager import TokenManager
@@ -23,7 +21,6 @@ from src.database.feature_repo import FeatureRepository
 from src.database.instrument_repo import InstrumentRepository
 from src.database.label_repo import LabelRepository
 from src.database.label_stats_repo import LabelingStatsRepository
-from src.database.models import OHLCVData
 from src.database.ohlcv_repo import OHLCVRepository
 from src.database.processing_state_repo import ProcessingStateRepository
 from src.database.signal_repo import SignalRepository
@@ -72,17 +69,9 @@ async def ensure_valid_authentication(token_manager: TokenManager, config: Any) 
         logger.info("✅ Access token is valid. Proceeding with application startup.")
         return True
 
-    # Step 3: Token is invalid, try to refresh it
-    logger.warning("❌ Access token is invalid or expired. Attempting to refresh...")
-    refresh_success = await token_manager.refresh_access_token(config.broker.api_key, config.broker.api_secret)
-
-    if refresh_success:
-        logger.info("✅ Access token refreshed successfully. Proceeding with application startup.")
-        return True
-
-    # Step 4: Refresh failed, clear and re-authenticate
-    logger.error("❌ Token refresh failed. Clearing tokens and initiating authentication flow.")
-    token_manager.clear_tokens()
+    # Step 3: Token is invalid, initiate re-authentication
+    logger.warning("❌ Access token is invalid or expired. Initiating authentication flow.")
+    # Note: We don't clear the token file to preserve it across restarts
     return await perform_authentication(token_manager, config)
 
 
@@ -133,7 +122,7 @@ async def handle_auth_failure(token_manager: TokenManager, config: Any, error_co
 
     if should_reauth:
         logger.error("🔄 Maximum authentication failures reached. Triggering re-authentication.")
-        token_manager.clear_tokens()
+        # We don't clear the token file to preserve it across restarts
         success = await perform_authentication(token_manager, config)
         if success:
             token_manager.reset_auth_failures()
@@ -345,7 +334,11 @@ async def initialize_historical_mode_enhanced(
     feature_calculator = FeatureCalculator(ohlcv_repo, feature_repo, instrument_repo, error_handler, health_monitor)
 
     labeler = OptimizedTripleBarrierLabeler(
-        BarrierConfig.from_config(config.trading.labeling), label_repo, instrument_repo, stats_repo, config.trading.labeling_timeframes
+        BarrierConfig.from_config(config.trading.labeling),
+        label_repo,
+        instrument_repo,
+        stats_repo,
+        config.trading.labeling_timeframes,
     )
     lgbm_trainer = LGBMTrainer(feature_repo, label_repo, error_handler, health_monitor, feature_calculator)
 
@@ -831,6 +824,9 @@ async def main_async() -> None:
         logger.critical("Authentication failed. Exiting system.")
         raise RuntimeError("Authentication failed. Cannot proceed.")
 
+    # Log successful authentication and proceed with system initialization
+    logger.info("✅ Authentication successful. Proceeding with system initialization.")
+
     # Skip old instrument synchronization - handled by smart processing pipeline
     logger.info("🧠 Instrument synchronization will be handled by smart processing pipeline")
 
@@ -849,7 +845,7 @@ async def main_async() -> None:
 
     if config.system.mode == "HISTORICAL_MODE":
         # Check for smart processing mode via environment variable
-        use_smart_processing = os.getenv("USE_SMART_PROCESSING", "false").lower() == "true"
+        use_smart_processing = os.getenv("USE_SMART_PROCESSING", "true").lower() == "true"
 
         if use_smart_processing:
             logger.info("🧠 USE_SMART_PROCESSING=true - Using enhanced state-aware processing")
