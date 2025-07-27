@@ -86,8 +86,8 @@ instrument_repo:
 
 label_repo:
   insert_labels: |
-    INSERT INTO labels (ts, instrument_id, timeframe, label, tp_price, sl_price, exit_price, exit_reason, exit_bar_offset, barrier_return, max_favorable_excursion, max_adverse_excursion, risk_reward_ratio, volatility_at_entry)
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+    INSERT INTO labels (ts, instrument_id, timeframe, label, tp_price, sl_price, exit_price, exit_reason, exit_bar_offset, barrier_return, path_adjusted_return, max_favorable_excursion, max_adverse_excursion, risk_reward_ratio, volatility_at_entry)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
     ON CONFLICT (instrument_id, timeframe, ts) DO UPDATE
     SET label = EXCLUDED.label,
         tp_price = EXCLUDED.tp_price,
@@ -273,6 +273,11 @@ processing_state_repo:
     SELECT EXISTS(
         SELECT 1 FROM processing_state 
         WHERE instrument_id = $1 AND process_type = $2 AND status = 'failed'
+    )
+  check_processing_in_progress: |
+    SELECT EXISTS(
+        SELECT 1 FROM processing_state 
+        WHERE instrument_id = $1 AND process_type = $2 AND status = 'in_progress'
     )
   get_processing_status: |
     SELECT status, completed_at, metadata

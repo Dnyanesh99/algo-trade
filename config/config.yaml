@@ -98,7 +98,7 @@ data_reset:
     # State Management Tables
     processing_state: true
     data_ranges: true
-    system_operations_state: true
+    system_operations_state: false
     
     # Aggregation and Analytics Tables
     daily_ohlcv_agg: true
@@ -335,7 +335,7 @@ trading:
               type: "SMA"
               length: 21
       
-      - name: stoch
+      - name: stochastic
         function: STOCH
         params:
           default: 
@@ -353,7 +353,7 @@ trading:
           5m: { length: 10, d_length: 2 }
           60m: { length: 21, d_length: 5 }
       
-      - name: willr
+      - name: williamsr
         function: WILLR
         params:
           default: 
@@ -438,30 +438,30 @@ trading:
           60m: { timeperiod: 20 }
       
       # ┌─ ENHANCED INDICATORS ─────────────────────────────────────────────────┐
-      - name: momentum_ratios
+      - name: momentumratios
         function: MOMENTUM_RATIOS
         params:
           default: { lookback_periods: [5, 10, 20], min_data_length: 20, normalization_constant: 50 }
           60m: { lookback_periods: [5, 10, 20, 50] }
       
-      - name: volatility_adjustments
+      - name: volatilityadjustments
         function: VOLATILITY_ADJUSTMENTS
         params:
           default: { min_data_length: 2 }
       
-      - name: trend_confirmations
+      - name: trendconfirmations
         function: TREND_CONFIRMATIONS
         params:
           default: { adx_normalization_factor: 25.0, trend_strength_max: 2.0 }
           60m: { adx_normalization_factor: 30.0 }
       
-      - name: mean_reversion_signals
+      - name: meanreversionsignals
         function: MEAN_REVERSION_SIGNALS
         params:
           default: { rsi_overbought: 70, rsi_oversold: 30, willr_overbought: -20, willr_oversold: -80, stoch_overbought: 80, stoch_oversold: 20 }
           60m: { rsi_overbought: 75, rsi_oversold: 25 }
       
-      - name: breakout_indicators
+      - name: breakoutindicators
         function: BREAKOUT_INDICATORS
         params:
           default: { min_data_length: 20, volume_lookback_short: 5, volume_lookback_long: 20, volume_ratio_max: 2.0 }
@@ -475,8 +475,8 @@ trading:
       bbands_lowerband: "bb_lower"
       aroon_aroonup: "aroon_up"
       aroon_aroondown: "aroon_down"
-      stoch_slowk: "stoch_k"
-      stoch_slowd: "stoch_d"
+      stochastic_slowk: "stoch_k"
+      stochastic_slowd: "stoch_d"
       obv_obv_signal: "obv_signal"
 
     # Internal Feature Mapping for Enhanced Indicators
@@ -487,12 +487,13 @@ trading:
       bbands_upperband: "bb_upper"
       bbands_middleband: "bb_middle"
       bbands_lowerband: "bb_lower"
-      stoch_slowk: "stoch_k"
-      stoch_slowd: "stoch_d"
+      stochastic_slowk: "stoch_k"
+      stochastic_slowd: "stoch_d"
       aroon_aroonup: "aroon_up"
       aroon_aroondown: "aroon_down"
       rsi: "rsi_14"
       atr: "atr_14"
+      williamsr: "willr"
 
   # ──────────────────────────────────────────────────────────────────────────
   # TRADING INSTRUMENTS
@@ -842,6 +843,11 @@ data_quality:
       equity_segments: ["EQ"]
       fno_segments: ["NFO-FUT", "NFO-OPT", "BFO-FUT", "BFO-OPT"]
 
+    # Column definitions for validation
+    column_definitions:
+      timestamp_columns: ["ts", "timestamp", "datetime", "time"]
+      price_columns: ["open", "high", "low", "close"]
+
   # Feature Validation Configuration
   feature_validation:
     enabled: true  # Enable feature validation
@@ -920,6 +926,27 @@ data_quality:
         tolerance: 0.0
       calculation_check:
         tolerance: 0.001
+
+    standard_indicator_ranges:
+      RSI: [0, 100]
+      STOCH: [0, 100]
+      WILLR: [-100, 0]
+      CCI: [-500, 500]               # Increased from [-300, 300] for index volatility
+      CMO: [-100, 100]
+      ULTOSC: [0, 100]
+      ADX: [0, 100]
+      AROON: [0, 100]
+      BOP: [-1, 1]
+      MACD: [-100, 100]             # Increased from [-10, 10] for index data
+      SAR: [0, 100000]
+      HT_TRENDLINE: [0, 100000]
+      OBV: [-inf, inf]
+      ADOSC: [-1000000, 1000000]
+      ATR: [0, 10000]
+      STDDEV: [0, 10000]
+      TRANGE: [0, 10000]
+      HT_DCPERIOD: [0, 100]
+      HT_PHASOR: [-1, 1]
     
     # Cross-feature validation settings (deprecated - kept for backward compatibility)
     cross_validation:
@@ -1052,7 +1079,7 @@ market_calendar:
 auth_server:
   max_retries: 5
   server_host: "0.0.0.0"
-  timeout_seconds: 300
+  timeout_seconds: 120  # Reduced from 300 to 120 seconds (2 minutes)
   open_browser: true
   auto_close_seconds: 10
 
