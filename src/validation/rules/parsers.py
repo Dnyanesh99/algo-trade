@@ -153,32 +153,7 @@ class IndicatorConfigParser(BaseRuleParser):
         rules = []
 
         # Standard indicator ranges - based on technical analysis knowledge
-        standard_ranges = {
-            # Oscillators (0-100 range)
-            "RSI": (0, 100),
-            "STOCH": (0, 100),
-            "WILLR": (-100, 0),
-            "CCI": (-300, 300),
-            "CMO": (-100, 100),
-            "ULTOSC": (0, 100),
-            "ADX": (0, 100),
-            "AROON": (0, 100),
-            "BOP": (-1, 1),
-            # Trend indicators (reasonable bounds)
-            "MACD": (-10, 10),  # Depends on price scale, but reasonable bounds
-            "SAR": (0, 100000),  # Should be positive, upper bound depends on price
-            "HT_TRENDLINE": (0, 100000),  # Should be positive
-            # Volume indicators
-            "OBV": (float("-inf"), float("inf")),  # Can be any value
-            "ADOSC": (-1000000, 1000000),  # Large range but bounded
-            # Volatility indicators
-            "ATR": (0, 10000),  # Should be positive
-            "STDDEV": (0, 10000),  # Should be positive
-            "TRANGE": (0, 10000),  # Should be positive
-            # Cycle indicators
-            "HT_DCPERIOD": (0, 100),  # Period values
-            "HT_PHASOR": (-1, 1),  # Normalized
-        }
+        standard_ranges = config.data_quality.feature_validation.standard_indicator_ranges or {}
 
         # Check if this indicator matches any standard type
         for standard_type, (min_val, max_val) in standard_ranges.items():

@@ -184,7 +184,9 @@ class ErrorHandler:
         """
         Centralized method to handle errors, log them, and update system state.
         """
-        logger.error(f"Error in {component_name}: {message}. Details: {details}", exc_info=exc_info)
+        safe_message = str(message).replace("{", "{{").replace("}", "}}")
+        safe_details = str(details).replace("{", "{{").replace("}", "}}")
+        logger.error(f"Error in {component_name}: {safe_message}. Details: {safe_details}", exc_info=exc_info)
         metrics_registry.increment_counter(
             "error_recovery_attempts_total", {"component": component_name, "error_type": "handled_error"}
         )
@@ -220,7 +222,8 @@ class ErrorHandler:
             return result
         except Exception as e:
             await breaker.record_failure()
+            safe_error = str(e).replace("{", "{{").replace("}", "}}")
             logger.error(
-                f"Operation '{operation.__name__}' for component '{component_name}' failed: {e}", exc_info=True
+                f"Operation '{operation.__name__}' for component '{component_name}' failed: {safe_error}", exc_info=True
             )
             raise

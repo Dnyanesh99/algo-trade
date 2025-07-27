@@ -204,11 +204,11 @@ class IndicatorCalculator:
             for name, ind in all_indicators.items()
             if name
             in [
-                "momentum_ratios",
-                "volatility_adjustments",
-                "trend_confirmations",
-                "mean_reversion_signals",
-                "breakout_indicators",
+                "momentumratios",
+                "volatilityadjustments",
+                "trendconfirmations",
+                "meanreversionsignals",
+                "breakoutindicators",
             ]
         }
         base_indicators = {name: ind for name, ind in all_indicators.items() if name not in enhanced_indicators}

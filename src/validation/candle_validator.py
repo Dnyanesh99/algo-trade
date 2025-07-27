@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 from enum import Enum, auto
-from typing import Any, Final
+from typing import Any
 
 import pandas as pd
 
@@ -14,12 +14,7 @@ from src.validation.interfaces import IValidator
 from src.validation.models import DataQualityReport
 from src.validation.outlier_detector import OutlierDetector
 
-# Constants
-TIMESTAMP_COLUMNS: Final[list[str]] = ["ts", "timestamp", "datetime", "time"]
-PRICE_COLUMNS: Final[list[str]] = ["open", "high", "low", "close"]
 
-
-# Custom Exceptions
 class ValidationError(Exception):
     """Raised when validation fails with unrecoverable errors."""
 
@@ -122,6 +117,15 @@ class CandleValidator(IValidator):
             raise ConfigurationError("Required columns must be specified in config")
         if not (0 <= self.config.validation.quality_score_threshold <= 100):
             raise ConfigurationError("Quality score threshold must be between 0 and 100")
+        if self.config.validation.column_definitions is None:
+            raise ConfigurationError("Column definitions configuration is required but not provided")
+
+    @property
+    def column_definitions(self) -> Any:  # ColumnDefinitionsConfig
+        """Get column definitions with guaranteed non-null access."""
+        if self.config.validation.column_definitions is None:
+            raise ConfigurationError("Column definitions configuration is required but not provided")
+        return self.config.validation.column_definitions
 
     def validate(self, df: pd.DataFrame, **kwargs: Any) -> tuple[bool, pd.DataFrame, DataQualityReport]:
         """
@@ -229,9 +233,12 @@ class CandleValidator(IValidator):
         )
 
     def _prepare_and_clean_data(self, context: ValidationContext) -> None:
-        ts_col = next((c for c in TIMESTAMP_COLUMNS if c in context.df.columns), None)
+        timestamp_columns = self.column_definitions.timestamp_columns
+        price_columns = self.column_definitions.price_columns
+
+        ts_col = next((c for c in timestamp_columns if c in context.df.columns), None)
         if not ts_col:
-            raise ValidationError(f"Missing timestamp column. Expected one of: {TIMESTAMP_COLUMNS}")
+            raise ValidationError(f"Missing timestamp column. Expected one of: {timestamp_columns}")
         if ts_col != "ts":
             context.df.rename(columns={ts_col: "ts"}, inplace=True)
         context.df["ts"] = pd.to_datetime(context.df["ts"], errors="coerce")
@@ -245,7 +252,8 @@ class CandleValidator(IValidator):
             context.metrics.issues.append(f"Removed {rows_before - len(context.df)} rows with NaN values.")
 
         # Price validation - only for required price columns
-        required_price_cols = [col for col in PRICE_COLUMNS if col in required_cols]
+        price_columns = self.column_definitions.price_columns
+        required_price_cols = [col for col in price_columns if col in required_cols]
         if required_price_cols:
             context.df = context.df[(context.df[required_price_cols] > 0).all(axis=1)]
 
@@ -265,9 +273,10 @@ class CandleValidator(IValidator):
         df = context.df
         violations = 0
         required_cols = self.config.validation.required_columns
+        price_columns = self.column_definitions.price_columns
 
         # Only perform OHLC validation if all OHLC columns are required
-        if all(col in required_cols for col in PRICE_COLUMNS):
+        if all(col in required_cols for col in price_columns):
             high_violations_mask = df["high"] < df[["open", "close"]].max(axis=1)
             low_violations_mask = df["low"] > df[["open", "close"]].min(axis=1)
 
@@ -283,7 +292,8 @@ class CandleValidator(IValidator):
                 df.loc[low_violations_mask, "low"] = df.loc[low_violations_mask, ["open", "low", "close"]].min(axis=1)
                 context.metrics.issues.append(f"Corrected {low_violations_mask.sum()} low price violations.")
         else:
-            missing_ohlc = [col for col in PRICE_COLUMNS if col not in required_cols]
+            price_columns = self.column_definitions.price_columns
+            missing_ohlc = [col for col in price_columns if col not in required_cols]
             if missing_ohlc:
                 context.metrics.issues.append(f"Skipping OHLC validation - missing required columns: {missing_ohlc}")
 
@@ -374,7 +384,8 @@ class CandleValidator(IValidator):
         gap_penalty = 1 - m.time_gaps / len(context.df) * penalties.gap_penalty if len(context.df) > 0 else 1.0
 
         # OHLC violations penalty - only for required price columns
-        required_price_cols = [col for col in PRICE_COLUMNS if col in required_cols]
+        price_columns = self.column_definitions.price_columns
+        required_price_cols = [col for col in price_columns if col in required_cols]
         if required_price_cols:
             ohlc_penalty = 1 - ((m.ohlc_violations / m.initial_rows) * penalties.ohlc_violation_penalty)
         else:

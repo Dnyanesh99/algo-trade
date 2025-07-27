@@ -45,6 +45,7 @@ class FeatureData(BaseModel):
     ts: datetime
     feature_name: str
     feature_value: float
+    timeframe: Optional[str] = None  # e.g., '5min', '15min', '60min'
 
 
 class LabelData(BaseModel):
@@ -57,6 +58,7 @@ class LabelData(BaseModel):
     exit_reason: Optional[str] = None
     exit_bar_offset: Optional[int] = None
     barrier_return: Optional[float] = None
+    path_adjusted_return: Optional[float] = None  # Added: path-adjusted return for transparency
     max_favorable_excursion: Optional[float] = None
     max_adverse_excursion: Optional[float] = None
     risk_reward_ratio: Optional[float] = None

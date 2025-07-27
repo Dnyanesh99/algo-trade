@@ -145,41 +145,64 @@ class FeatureCalculator:
         all_features_to_store: list[FeatureData] = []
 
         # Step 2: Process results and collect all features to be stored
-        for i, result in enumerate(results_with_data):
+        for i, calc_task_result in enumerate(results_with_data):
             timeframe_minutes = self.timeframes[i]
             timeframe_str = f"{timeframe_minutes}min"
 
-            if isinstance(result, Exception):
+            if isinstance(calc_task_result, Exception):
                 await self.error_handler.handle_error(
                     "feature_calculator",
-                    f"Unhandled exception in timeframe calculation for instrument {instrument_id}: {result}",
+                    f"Unhandled exception in timeframe calculation for instrument {instrument_id}: {calc_task_result}",
                     {"instrument_id": instrument_id, "timeframe": timeframe_str},
                 )
                 failure_result, _ = self._create_failure_result(
-                    instrument_id, timeframe_str, latest_candle_timestamp, [str(result)], datetime.now()
+                    instrument_id, timeframe_str, latest_candle_timestamp, [str(calc_task_result)], datetime.now()
                 )
                 final_results.append(failure_result)
             else:
                 # Unpack the tuple of (FeatureCalculationResult, list[FeatureData])
-                # At this point, result is guaranteed to be a tuple, not an Exception
+                # At this point, calc_task_result is guaranteed to be a tuple, not an Exception
                 calc_result, features_to_store = cast(
-                    "tuple[FeatureCalculationResult, Optional[list[FeatureData]]]", result
+                    "tuple[FeatureCalculationResult, Optional[list[FeatureData]]]", calc_task_result
                 )
                 final_results.append(calc_result)
                 if calc_result.success and features_to_store:
                     all_features_to_store.extend(features_to_store)
 
-        # Step 3: Perform a single batch insert to the database
+        # Step 3: Group features by timeframe and insert separately
         if all_features_to_store:
             try:
-                await self.feature_repo.insert_features(instrument_id, "batch", all_features_to_store)
+                # Group features by timeframe
+                features_by_timeframe: dict[str, list[FeatureData]] = {}
+                for feature in all_features_to_store:
+                    timeframe = feature.timeframe
+                    if timeframe is not None:
+                        if timeframe not in features_by_timeframe:
+                            features_by_timeframe[timeframe] = []
+                        features_by_timeframe[timeframe].append(feature)
+
+                # Insert features for each timeframe separately and update results
+                total_stored = 0
+                features_stored_by_timeframe = {}
+                for timeframe, features_list in features_by_timeframe.items():
+                    await self.feature_repo.insert_features(instrument_id, timeframe, features_list)
+                    stored_count = len(features_list)
+                    total_stored += stored_count
+                    features_stored_by_timeframe[timeframe] = stored_count
+                    logger.info(f"Stored {stored_count} features for instrument {instrument_id} ({timeframe})")
+
+                # Update the features_stored count in each result
+                for result in final_results:
+                    if result.success and result.timeframe in features_stored_by_timeframe:
+                        result.features_stored = features_stored_by_timeframe[result.timeframe]
+
                 logger.info(
-                    f"Successfully stored a batch of {len(all_features_to_store)} features for instrument {instrument_id}."
+                    f"Successfully stored {total_stored} features across {len(features_by_timeframe)} timeframes for instrument {instrument_id}."
                 )
             except Exception as e:
                 await self.error_handler.handle_error(
                     "feature_storage",
-                    f"Batch feature storage failed for instrument {instrument_id}: {e}",
+                    f"Feature storage failed for instrument {instrument_id}: {e}",
                     {"instrument_id": instrument_id, "total_features": len(all_features_to_store)},
                 )
                 # Optionally update results to reflect storage failure
@@ -325,20 +348,19 @@ class FeatureCalculator:
                     ts=row["ts"],
                     feature_name=row["feature_name"],
                     feature_value=row["feature_value"],
+                    timeframe=timeframe_str,
                 )
                 for _, row in features_to_insert.iterrows()
             ]
 
-            stored_count = 0
-            if feature_models:
-                await self.feature_repo.insert_features(instrument_id, timeframe_str, feature_models)
-                stored_count = len(feature_models)
+            # Note: Features are stored in batch at the top level, not individually here
+            # Feature count: len(feature_models) if feature_models else 0
 
             processing_time = (datetime.now() - tf_start_time).total_seconds() * 1000
             processing_duration = processing_time / 1000  # Convert to seconds for metrics
 
             # Record metrics for feature calculation
-            success = stored_count > 0
+            success = len(feature_models) > 0
             if metrics_registry.is_enabled():
                 metrics_registry.increment_counter(
                     "feature_calculations_total",
@@ -361,7 +383,7 @@ class FeatureCalculator:
                 timeframe=timeframe_str,
                 timestamp=latest_candle_timestamp,
                 features_calculated=len(features_df.columns) - 1,
-                features_stored=stored_count,
+                features_stored=0,  # Will be updated by batch storage process
                 validation_errors=validation_errors,
                 processing_time_ms=processing_time,
                 quality_score=quality_score,

@@ -2,6 +2,7 @@ from datetime import date, time
 from typing import Any, Literal, Optional, Union
 
 import yaml
+from dotenv import load_dotenv
 from pydantic import BaseModel, Field, ValidationError, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -307,11 +308,11 @@ class FeatureGenerationConfig(StrictBaseModel):
     enabled: bool = True
     patterns: list[str] = Field(
         default_factory=lambda: [
-            "momentum_ratios",
-            "volatility_adjustments",
-            "trend_confirmations",
-            "mean_reversion_signals",
-            "breakout_indicators",
+            "momentumratios",
+            "volatilityadjustments",
+            "trendconfirmations",
+            "meanreversionsignals",
+            "breakoutindicators",
         ]
     )
     lookback_periods: list[int] = Field(default_factory=lambda: [5, 10, 20, 50])
@@ -439,6 +440,11 @@ class InstrumentSegmentsConfig(StrictBaseModel):
     fno_segments: list[str] = Field(default_factory=lambda: ["FUT", "OPT", "NFO-FUT", "NFO-OPT", "BFO-FUT", "BFO-OPT"])
 
 
+class ColumnDefinitionsConfig(StrictBaseModel):
+    timestamp_columns: list[str] = Field(default_factory=lambda: ["ts", "timestamp", "datetime", "time"])
+    price_columns: list[str] = Field(default_factory=lambda: ["open", "high", "low", "close"])
+
+
 class DataQualityValidationConfig(StrictBaseModel):
     enabled: bool
     min_valid_rows: int = Field(ge=0)
@@ -447,6 +453,7 @@ class DataQualityValidationConfig(StrictBaseModel):
     required_columns: list[str] = Field(default_factory=list)
     instrument_segments: InstrumentSegmentsConfig = Field(default_factory=InstrumentSegmentsConfig)
     indicator_validation: Optional[dict[str, Any]] = None
+    column_definitions: Optional[ColumnDefinitionsConfig] = Field(default=None)
 
 
 class DataQualityFeatureValidationCustomRuleConfig(StrictBaseModel):
@@ -511,6 +518,7 @@ class DataQualityFeatureValidationConfig(StrictBaseModel):
     consistency_rules: Optional[list[dict[str, Any]]] = None
     consistency_rule_defaults: Optional[dict[str, dict[str, Any]]] = None
     price_relative_rules: Optional[list[DataQualityFeatureValidationCustomRuleConfig]] = None
+    standard_indicator_ranges: Optional[dict[str, list[float]]] = None
 
 
 class DataQualityConfig(StrictBaseModel):
@@ -785,6 +793,9 @@ class ConfigLoader:
                     except yaml.YAMLError as e:
                         logger.error(f"Error parsing metrics config file '{self.metrics_path}': {e}")
                         raise ValueError(f"Error parsing metrics config file '{self.metrics_path}': {e}") from e
+
+                # Load environment variables from .env file
+                load_dotenv()
 
                 # Load database configuration from environment variables using Pydantic BaseSettings
                 db_config = DatabaseConfig()  # type: ignore[call-arg]  # nosec

@@ -8,7 +8,6 @@ The existing pipeline remains fully functional - this provides state-aware alter
 """
 
 import asyncio
-import os
 import uuid
 from datetime import datetime, timedelta
 from typing import Any, Optional
@@ -23,7 +22,9 @@ from src.state.health_monitor import HealthMonitor
 from src.state.system_state import SystemState
 from src.utils.config_loader import AppConfig, ProcessingControlConfig
 from src.utils.dependency_container import HistoricalPipelineDependencies
+from src.utils.env_utils import get_bool_env
 from src.utils.logger import LOGGER as logger
+from src.utils.processing_decision_engine import ProcessingDecisionEngine, ProcessingStage
 
 
 class HistoricalPipelineManager:
@@ -61,12 +62,17 @@ class HistoricalPipelineManager:
             self.processing_control = ProcessingControlConfig()
 
         # Environment overrides for frequently changing controls
-        self.force_reprocess = self._get_bool_env("FORCE_REPROCESS")
-        self.reset_state = self._get_bool_env("RESET_PROCESSING_STATE")
-        self.truncate_all_data = self._get_bool_env("TRUNCATE_ALL_DATA")
+        self.force_reprocess = get_bool_env("FORCE_REPROCESS")
+        self.reset_state = get_bool_env("RESET_PROCESSING_STATE")
+        self.truncate_all_data = get_bool_env("TRUNCATE_ALL_DATA")
 
         # Generate unique session ID for this pipeline run
         self._session_id = str(uuid.uuid4())
+
+        # Initialize unified decision engine
+        self.decision_engine = ProcessingDecisionEngine(
+            processing_state_repo=processing_state_repo, config=config, force_reprocess=self.force_reprocess
+        )
 
         if self.force_reprocess:
             logger.warning("FORCE_REPROCESS=true - All data will be reprocessed")
@@ -78,7 +84,7 @@ class HistoricalPipelineManager:
         # Initialize timezone for datetime normalization
         self.timezone = pytz.timezone(config.system.timezone)
 
-        logger.info("ProcessingPipelineManager initialized with state-aware processing")
+        logger.info("ProcessingPipelineManager initialized with unified decision engine")
 
     def _normalize_datetime(self, dt: datetime) -> datetime:
         """
@@ -95,23 +101,6 @@ class HistoricalPipelineManager:
             return self.timezone.localize(dt)
         # If already timezone-aware, convert to system timezone
         return dt.astimezone(self.timezone)
-
-    @staticmethod
-    def _get_bool_env(env_var_name: str, default: bool = False) -> bool:
-        """
-        Helper to parse boolean environment variables.
-
-        Args:
-            env_var_name: Name of the environment variable
-            default: Default value if env var is not set
-
-        Returns:
-            Boolean value parsed from environment variable
-        """
-        env_value = os.getenv(env_var_name)
-        if env_value is None:
-            return default
-        return env_value.lower() in ("true", "1", "yes", "on")
 
     @staticmethod
     def _validate_timeframe(timeframe: str) -> bool:
@@ -244,7 +233,11 @@ class HistoricalPipelineManager:
 
         try:
             # Truncate all data if requested (DANGEROUS - happens ONCE per system run)
+            logger.debug(
+                f"🔍 Truncation check: truncate_all_data={self.truncate_all_data}, env_var=TRUNCATE_ALL_DATA={get_bool_env('TRUNCATE_ALL_DATA')}"
+            )
             if self.truncate_all_data:
+                logger.info("🚨 TRUNCATE_ALL_DATA=true detected - initiating global truncation check")
                 (
                     truncation_requested,
                     truncation_performed,
@@ -264,11 +257,14 @@ class HistoricalPipelineManager:
                 await self.processing_state_repo.reset_processing_state(instrument_id)
                 self.system_state.reset_processing_state(instrument_id)
 
-            # 1. Historical Data Processing (with state awareness)
+            # 1. Historical Data Processing (unified decision engine)
             logger.info(f"🔄 Stage 1/5: Evaluating historical data processing for {symbol} (ID: {instrument_id})")
-            if self._get_bool_env("HISTORICAL_PROCESSING_ENABLED", True) and await self._should_process_historical_data(
-                instrument_id
-            ):
+            historical_decision = await self.decision_engine.should_process(
+                ProcessingStage.HISTORICAL_FETCH, instrument_id
+            )
+            self.decision_engine.log_decision(historical_decision)
+
+            if historical_decision.should_process:
                 logger.info(f"📊 Processing historical data for {symbol} (ID: {instrument_id})")
                 success = await self.error_handler.execute_safely(
                     "historical_processing",
@@ -284,11 +280,12 @@ class HistoricalPipelineManager:
             else:
                 logger.info(f"⏭️  Stage 1/5: Skipping historical data processing for {symbol}")
 
-            # 2. Aggregation Processing (with dependency check)
+            # 2. Aggregation Processing (unified decision engine)
             logger.info(f"🔄 Stage 2/5: Evaluating aggregation processing for {symbol} (ID: {instrument_id})")
-            if self._get_bool_env("AGGREGATION_PROCESSING_ENABLED", True) and await self._should_process_aggregation(
-                instrument_id
-            ):
+            aggregation_decision = await self.decision_engine.should_process(ProcessingStage.AGGREGATION, instrument_id)
+            self.decision_engine.log_decision(aggregation_decision)
+
+            if aggregation_decision.should_process:
                 logger.info(f"📈 Processing aggregation for {symbol} (ID: {instrument_id})")
                 success = await self.error_handler.execute_safely(
                     "aggregation_processing", self._process_aggregation_smart, instrument_id, components=components
@@ -302,11 +299,12 @@ class HistoricalPipelineManager:
 
             # Continue with remaining stages only if aggregation was successful or skipped
 
-            # 3. Feature Calculation (with dependency check)
+            # 3. Feature Calculation (unified decision engine)
             logger.info(f"🔄 Stage 3/5: Evaluating feature calculation for {symbol} (ID: {instrument_id})")
-            if self._get_bool_env("FEATURE_PROCESSING_ENABLED", True) and await self._should_process_features(
-                instrument_id
-            ):
+            features_decision = await self.decision_engine.should_process(ProcessingStage.FEATURES, instrument_id)
+            self.decision_engine.log_decision(features_decision)
+
+            if features_decision.should_process:
                 logger.info(f"🧮 Processing features for {symbol} (ID: {instrument_id})")
                 success = await self.error_handler.execute_safely(
                     "feature_processing", self._process_features_smart, instrument_id, components=components
@@ -318,11 +316,12 @@ class HistoricalPipelineManager:
             else:
                 logger.info(f"⏭️  Stage 3/5: Skipping feature calculation for {symbol}")
 
-            # 4. Labeling (with dependency check)
+            # 4. Labeling (unified decision engine)
             logger.info(f"🔄 Stage 4/5: Evaluating labeling for {symbol} (ID: {instrument_id})")
-            if self._get_bool_env("LABELING_PROCESSING_ENABLED", True) and await self._should_process_labeling(
-                instrument_id
-            ):
+            labeling_decision = await self.decision_engine.should_process(ProcessingStage.LABELING, instrument_id)
+            self.decision_engine.log_decision(labeling_decision)
+
+            if labeling_decision.should_process:
                 logger.info(f"🏷️  Processing labeling for {symbol} (ID: {instrument_id})")
                 success = await self.error_handler.execute_safely(
                     "labeling_processing",
@@ -336,13 +335,9 @@ class HistoricalPipelineManager:
                     return False
                 logger.info(f"✅ Stage 4/5: Labeling completed for {symbol}")
             else:
-                # Check if labeling was skipped due to failed dependencies
-                try:
-                    dependencies_satisfied = await self.processing_state_repo.validate_processing_dependencies(
-                        instrument_id, "labeling"
-                    )
-                    if not dependencies_satisfied:
-                        # Check if features failed
+                # Enhanced dependency failure detection
+                if "Dependencies not satisfied" in labeling_decision.reason:
+                    try:
                         features_failed = await self.processing_state_repo.is_processing_failed(
                             instrument_id, "features"
                         )
@@ -352,14 +347,17 @@ class HistoricalPipelineManager:
                                 f"feature processing failed and labeling cannot proceed"
                             )
                             return False
-                except Exception as e:
-                    logger.error(f"Error checking labeling dependencies for {symbol}: {e}")
+                    except Exception as e:
+                        logger.error(f"Error checking dependency failures for {symbol}: {e}")
 
                 logger.info(f"⏭️  Stage 4/5: Skipping labeling for {symbol}")
 
-            # 5. Model Training (same as main.py logic)
+            # 5. Model Training (unified decision engine)
             logger.info(f"🔄 Stage 5/5: Evaluating model training for {symbol} (ID: {instrument_id})")
-            if await self._should_process_training(instrument_id):
+            training_decision = await self.decision_engine.should_process(ProcessingStage.TRAINING, instrument_id)
+            self.decision_engine.log_decision(training_decision)
+
+            if training_decision.should_process:
                 logger.info(f"🤖 Processing model training for {symbol} (ID: {instrument_id})")
                 success = await self.error_handler.execute_safely(
                     "training_processing",
@@ -373,13 +371,9 @@ class HistoricalPipelineManager:
                     return False
                 logger.info(f"✅ Stage 5/5: Model training completed for {symbol}")
             else:
-                # Check if training was skipped due to failed dependencies
-                try:
-                    dependencies_satisfied = await self.processing_state_repo.validate_processing_dependencies(
-                        instrument_id, "training"
-                    )
-                    if not dependencies_satisfied:
-                        # Check if labeling failed
+                # Enhanced dependency failure detection
+                if "Dependencies not satisfied" in training_decision.reason:
+                    try:
                         labeling_failed = await self.processing_state_repo.is_processing_failed(
                             instrument_id, "labeling"
                         )
@@ -389,8 +383,8 @@ class HistoricalPipelineManager:
                                 f"labeling processing failed and training cannot proceed"
                             )
                             return False
-                except Exception as e:
-                    logger.error(f"Error checking training dependencies for {symbol}: {e}")
+                    except Exception as e:
+                        logger.error(f"Error checking dependency failures for {symbol}: {e}")
 
                 logger.info(f"⏭️  Stage 5/5: Skipping model training for {symbol}")
 
@@ -423,208 +417,6 @@ class HistoricalPipelineManager:
                 },
             )
             return False
-
-    async def _should_process_historical_data(self, instrument_id: int) -> bool:
-        """Enhanced historical data processing decision with data-aware checks."""
-        # Check if historical processing is enabled via environment variable
-        if not self._get_bool_env("HISTORICAL_PROCESSING_ENABLED", True):
-            logger.info(f"Historical processing disabled for {instrument_id}. Skipping.")
-            return False
-
-        # Check database state first - but proceed if FORCE_REPROCESS=true
-        try:
-            is_complete = await self.processing_state_repo.is_processing_complete(instrument_id, "historical_fetch")
-            if is_complete and not self.force_reprocess:
-                logger.info(f"Historical data already processed for {instrument_id}. Skipping.")
-                return False
-            if is_complete and self.force_reprocess:
-                logger.info(
-                    f"FORCE_REPROCESS=true - Reprocessing historical data for {instrument_id} despite being complete"
-                )
-        except Exception as e:
-            logger.error(f"Error checking processing state for {instrument_id}: {e}")
-            # Continue processing if we can't check the state
-
-        # Check if we already have sufficient historical data - but respect FORCE_REPROCESS
-        try:
-            has_sufficient_data = await self.processing_state_repo.has_actual_data_for_processing(
-                instrument_id, "historical_fetch", self.config
-            )
-
-            if has_sufficient_data and not self.force_reprocess:
-                logger.info(
-                    f"Sufficient historical data already exists for {instrument_id}. Marking as complete and skipping."
-                )
-                # Mark as complete since data exists
-                await self.processing_state_repo.mark_processing_complete(
-                    instrument_id,
-                    "historical_fetch",
-                    {"reason": "sufficient_existing_data", "timestamp": datetime.now().isoformat()},
-                )
-                return False
-            if has_sufficient_data and self.force_reprocess:
-                logger.info(
-                    f"FORCE_REPROCESS=true - Reprocessing historical data for {instrument_id} despite sufficient existing data"
-                )
-        except Exception as e:
-            logger.error(f"Error checking data sufficiency for {instrument_id}: {e}")
-            # Continue processing if we can't check data sufficiency
-
-        logger.info(f"Historical data processing should proceed for {instrument_id}")
-        return True
-
-    async def _should_process_aggregation(self, instrument_id: int) -> bool:
-        """Enhanced aggregation processing decision with dependency validation."""
-        # Check if aggregation is enabled via environment variable
-        if not self._get_bool_env("AGGREGATION_PROCESSING_ENABLED", True):
-            logger.info(f"Aggregation processing disabled for {instrument_id}. Skipping.")
-            return False
-
-        # Check if already processed (state-based) - but proceed if FORCE_REPROCESS=true
-        try:
-            is_complete = await self.processing_state_repo.is_processing_complete(instrument_id, "aggregation")
-            if is_complete and not self.force_reprocess:
-                logger.info(f"Aggregation already processed for {instrument_id}. Skipping.")
-                return False
-            if is_complete and self.force_reprocess:
-                logger.info(
-                    f"FORCE_REPROCESS=true - Reprocessing aggregation for {instrument_id} despite being complete"
-                )
-        except Exception as e:
-            logger.error(f"Error checking aggregation processing state for {instrument_id}: {e}")
-            # Continue processing if we can't check the state
-
-        # Validate processing dependencies (handles environment variables and data checks)
-        try:
-            dependencies_satisfied = await self.processing_state_repo.validate_processing_dependencies(
-                instrument_id, "aggregation"
-            )
-            if not dependencies_satisfied:
-                logger.warning(f"Dependencies not satisfied for aggregation on {instrument_id}. Skipping.")
-                return False
-        except Exception as e:
-            logger.error(f"Error validating dependencies for aggregation on {instrument_id}: {e}")
-            logger.warning(f"Skipping aggregation for {instrument_id} due to dependency check failure - fail-safe mode")
-            return False
-
-        logger.info(f"Aggregation should proceed for {instrument_id} - dependencies satisfied")
-        return True
-
-    async def _should_process_features(self, instrument_id: int) -> bool:
-        """Enhanced feature processing decision with dependency validation."""
-        # Check if feature processing is enabled via environment variable
-        if not self._get_bool_env("FEATURE_PROCESSING_ENABLED", True):
-            logger.info(f"Feature processing disabled for {instrument_id}. Skipping.")
-            return False
-
-        # Check if already processed (state-based) - but proceed if FORCE_REPROCESS=true
-        try:
-            is_complete = await self.processing_state_repo.is_processing_complete(instrument_id, "features")
-            if is_complete and not self.force_reprocess:
-                logger.info(f"Features already processed for {instrument_id}. Skipping.")
-                return False
-            if is_complete and self.force_reprocess:
-                logger.info(f"FORCE_REPROCESS=true - Reprocessing features for {instrument_id} despite being complete")
-        except Exception as e:
-            logger.error(f"Error checking features processing state for {instrument_id}: {e}")
-            # Continue processing if we can't check the state
-
-        # Validate processing dependencies (handles environment variables and data checks)
-        try:
-            dependencies_satisfied = await self.processing_state_repo.validate_processing_dependencies(
-                instrument_id, "features"
-            )
-            if not dependencies_satisfied:
-                logger.warning(f"Dependencies not satisfied for features on {instrument_id}. Skipping.")
-                return False
-        except Exception as e:
-            logger.error(f"Error validating dependencies for features on {instrument_id}: {e}")
-            logger.warning(f"Skipping features for {instrument_id} due to dependency check failure - fail-safe mode")
-            return False
-
-        logger.info(f"Features should proceed for {instrument_id} - dependencies satisfied")
-        return True
-
-    async def _should_process_labeling(self, instrument_id: int) -> bool:
-        """Enhanced labeling processing decision with dependency validation."""
-        # Check if labeling processing is enabled via environment variable
-        if not self._get_bool_env("LABELING_PROCESSING_ENABLED", True):
-            logger.info(f"Labeling processing disabled for {instrument_id}. Skipping.")
-            return False
-
-        # Check if already processed (state-based) - but proceed if FORCE_REPROCESS=true
-        try:
-            is_complete = await self.processing_state_repo.is_processing_complete(instrument_id, "labeling")
-            if is_complete and not self.force_reprocess:
-                logger.info(f"Labeling already processed for {instrument_id}. Skipping.")
-                return False
-            if is_complete and self.force_reprocess:
-                logger.info(f"FORCE_REPROCESS=true - Reprocessing labeling for {instrument_id} despite being complete")
-        except Exception as e:
-            logger.error(f"Error checking labeling processing state for {instrument_id}: {e}")
-            # Continue processing if we can't check the state
-
-        # Validate processing dependencies (handles environment variables and data checks)
-        try:
-            dependencies_satisfied = await self.processing_state_repo.validate_processing_dependencies(
-                instrument_id, "labeling"
-            )
-            if not dependencies_satisfied:
-                logger.warning(f"Dependencies not satisfied for labeling on {instrument_id}. Skipping.")
-                # Log detailed status for debugging
-                await self.processing_state_repo.log_processing_summary(instrument_id)
-                return False
-        except Exception as e:
-            logger.error(f"Error validating dependencies for labeling on {instrument_id}: {e}")
-            logger.warning(f"Skipping labeling for {instrument_id} due to dependency check failure - fail-safe mode")
-            return False
-
-        logger.info(f"Labeling should proceed for {instrument_id} - dependencies satisfied")
-        return True
-
-    async def _should_process_training(self, instrument_id: int) -> bool:
-        """Determine if model training should run."""
-        # Check if training processing is enabled via environment variable
-        if not self._get_bool_env("TRAINING_PROCESSING_ENABLED", True):
-            logger.info(f"Training processing disabled for {instrument_id}. Skipping.")
-            return False
-
-        # Check if already processed (state-based) - but proceed if FORCE_REPROCESS=true
-        try:
-            training_complete = await self.processing_state_repo.is_processing_complete(instrument_id, "training")
-            if training_complete and not self.force_reprocess:
-                logger.info(f"Training already processed for {instrument_id}. Skipping.")
-                return False
-            if training_complete and self.force_reprocess:
-                logger.info(f"FORCE_REPROCESS=true - Reprocessing training for {instrument_id} despite being complete")
-        except Exception as e:
-            logger.error(f"Error checking training completion for {instrument_id}: {e}")
-            # Continue with training if we can't check if it's already done
-
-        # Validate processing dependencies (handles environment variables and data checks)
-        if not self.force_reprocess:
-            try:
-                dependencies_satisfied = await self.processing_state_repo.validate_processing_dependencies(
-                    instrument_id, "training"
-                )
-                if not dependencies_satisfied:
-                    logger.warning(f"Dependencies not satisfied for training on {instrument_id}. Skipping.")
-                    # Log detailed status for debugging
-                    await self.processing_state_repo.log_processing_summary(instrument_id)
-                    return False
-            except Exception as e:
-                logger.error(f"Error validating dependencies for training on {instrument_id}: {e}")
-                logger.warning(
-                    f"Skipping training for {instrument_id} due to dependency check failure - fail-safe mode"
-                )
-                return False
-        else:
-            logger.warning(f"FORCE_REPROCESS=true - Bypassing dependency checks for training on {instrument_id}")
-            # Still log the status for awareness
-            await self.processing_state_repo.log_processing_summary(instrument_id)
-
-        logger.info(f"Training should proceed for {instrument_id}")
-        return True
 
     async def _process_historical_data_smart(
         self, instrument_id: int, configured_inst: Any, components: HistoricalPipelineDependencies
@@ -974,52 +766,53 @@ class HistoricalPipelineManager:
             # Continue processing even if we can't update the state
 
         try:
-            successful_features = 0
-            expected_features = 0
-            # Same loop logic as main.py
-            for timeframe in self.config.trading.feature_timeframes:
-                # Validate timeframe to prevent injection
-                if not self._validate_timeframe(str(timeframe)):
-                    logger.error(f"Invalid timeframe value: {timeframe}. Skipping.")
-                    continue
-                timeframe_str = f"{timeframe}min"
-                expected_features += 1
+            # Get latest candle from the primary timeframe (first configured timeframe)
+            primary_timeframe = self.config.trading.feature_timeframes[0]
+            primary_timeframe_str = f"{primary_timeframe}min"
 
-                latest_candle = await ohlcv_repo.get_latest_candle(instrument_id, timeframe_str)
-                if not latest_candle:
-                    logger.warning(f"No {timeframe_str} data found for {instrument_id}. Skipping feature calculation.")
-                    continue
+            latest_candle = await ohlcv_repo.get_latest_candle(instrument_id, primary_timeframe_str)
+            if not latest_candle:
+                error_message = f"No {primary_timeframe_str} data found for {instrument_id}. Cannot calculate features."
+                logger.error(error_message)
+                await self.processing_state_repo.mark_processing_failed(
+                    instrument_id,
+                    "features",
+                    {
+                        "error": error_message,
+                        "failed_at": datetime.now().isoformat(),
+                    },
+                )
+                return False
 
-                # Same feature calculation call as main.py
+            # Calculate features for ALL timeframes in a single call
+            # The feature calculator processes all configured timeframes internally
+            logger.info(
+                f"Calculating features for ALL timeframes {self.config.trading.feature_timeframes} using latest candle from {primary_timeframe_str}"
+            )
+
+            feature_results = await feature_calculator.calculate_and_store_features(instrument_id, latest_candle.ts)
+
+            # Check results for all timeframes
+            successful_count = 0
+            failed_count = 0
+            for r in feature_results:
                 try:
-                    feature_results = await feature_calculator.calculate_and_store_features(
-                        instrument_id, latest_candle.ts
-                    )
+                    if hasattr(r, "success") and r.success:
+                        successful_count += 1
+                    else:
+                        failed_count += 1
+                except Exception as result_error:
+                    logger.warning(f"Error checking feature result: {result_error}")
+                    failed_count += 1
 
-                    # Safely check results - handle cases where results might be exceptions or malformed
-                    successful_count = 0
-                    for r in feature_results:
-                        try:
-                            if hasattr(r, "success") and r.success:
-                                successful_count += 1
-                        except Exception as result_error:
-                            logger.warning(f"Error checking feature result for {timeframe_str}: {result_error}")
-                            continue
+            logger.info(f"Feature calculation completed: {successful_count} successful, {failed_count} failed")
 
-                    successful_features += 1 if successful_count > 0 else 0
-                    logger.info(f"Calculated {successful_count} features for {timeframe_str}")
-
-                except Exception as calc_error:
-                    logger.error(f"Feature calculation failed for {timeframe_str}: {calc_error}")
-                    # Continue with next timeframe instead of failing completely
-                    continue
-
-            # Mark completion
-            if successful_features > 0:
+            # Mark completion if any features were successfully calculated
+            if successful_count > 0:
                 await self.processing_state_repo.mark_processing_complete(
                     instrument_id,
                     "features",
-                    {"features_calculated": successful_features, "processing_time": datetime.now().isoformat()},
+                    {"features_calculated": successful_count, "processing_time": datetime.now().isoformat()},
                 )
                 self.system_state.mark_processing_complete(instrument_id, "features")
                 logger.info(f"Successfully completed feature calculation for instrument {instrument_id}")
@@ -1141,7 +934,7 @@ class HistoricalPipelineManager:
             raise
         except Exception as e:
             # Mark processing as failed
-            error_message = str(e)
+            error_message = str(e).replace("{", "{{").replace("}", "}}")
             logger.error(f"Labeling processing failed for {instrument_id}: {error_message}", exc_info=True)
             try:
                 await self.processing_state_repo.mark_processing_failed(

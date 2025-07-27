@@ -20,11 +20,11 @@ class FeatureValidator(IValidator):
         self.config = config or ConfigLoader().get_config()
         self.registry = self._initialize_registry()
         # Initialize consistency validator with proper configuration path
-        consistency_rules = []
+        consistency_rules: list[dict[str, Any]] = []
         if (
             self.config.data_quality
             and self.config.data_quality.feature_validation
-            and hasattr(self.config.data_quality.feature_validation, "consistency_rules")
+            and self.config.data_quality.feature_validation.consistency_rules
         ):
             consistency_rules = self.config.data_quality.feature_validation.consistency_rules
         self.consistency_validator = ConsistencyValidator(consistency_rules)

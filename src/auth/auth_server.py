@@ -3,7 +3,7 @@ import threading
 import time
 import webbrowser
 from datetime import datetime
-from typing import Any, Optional, Union
+from typing import Optional, Union
 from urllib.parse import urlparse
 
 from flask import Flask, Response, jsonify, render_template, request
@@ -175,9 +175,7 @@ def auth_refresh() -> str:
 @app.route("/callback")
 def auth_callback() -> str:
     """Handles the OAuth callback from Zerodha after user authentication."""
-    global auth_result
-    global global_authenticator_instance
-    global global_token_manager_instance
+    global auth_result, global_authenticator_instance, global_token_manager_instance
 
     logger.info(f"Received callback from broker with args: {request.args}")
     request_token = request.args.get("request_token")
@@ -208,31 +206,9 @@ def auth_callback() -> str:
 
         logger.info("About to call set_token()")
         try:
-            # Add timeout protection for set_token call
-            import signal
+            global_token_manager_instance.set_token(access_token)
+            logger.info("set_token() completed successfully")
 
-            def timeout_handler(signum: int, frame: Optional[Any]) -> None:
-                raise TimeoutError("set_token() operation timed out after 10 seconds")
-
-            # Set up timeout for set_token call
-            signal.signal(signal.SIGALRM, timeout_handler)
-            signal.alarm(10)  # 10 second timeout
-
-            try:
-                global_token_manager_instance.set_token(access_token)
-                logger.info("set_token() completed successfully")
-            finally:
-                signal.alarm(0)  # Cancel the alarm
-
-        except TimeoutError as timeout_error:
-            logger.critical(f"TIMEOUT ERROR in set_token(): {timeout_error}", exc_info=True)
-            auth_error_event.set()
-            return render_template(
-                "auth_error.html",
-                error_type="TIMEOUT",
-                error_message="Token saving operation timed out. Please try again.",
-                request_token=request_token,
-            )
         except Exception as token_error:
             logger.critical(f"CRITICAL ERROR in set_token(): {token_error}", exc_info=True)
             auth_error_event.set()
@@ -243,10 +219,20 @@ def auth_callback() -> str:
                 request_token=request_token,
             )
 
-        # Set the success event immediately after token is saved
-        logger.info("Setting auth_success_event...")
-        auth_success_event.set()
-        logger.info("Authentication flow completed successfully. Success event has been set!")
+        # CRITICAL FIX: Set the success event immediately after token is saved
+        # Use try-catch to ensure event setting doesn't fail silently
+        try:
+            logger.info("Setting auth_success_event...")
+            auth_success_event.set()
+            logger.info(
+                f"Authentication flow completed successfully. Success event has been set! Event state: {auth_success_event.is_set()}"
+            )
+        except Exception as event_error:
+            logger.critical(f"CRITICAL ERROR setting success event: {event_error}", exc_info=True)
+            # Continue anyway since token is already saved
+
+        # Also update the global auth_result for debugging
+        auth_result = {"success": True, "message": "Authentication completed successfully"}
 
         token_preview = f"{access_token[:10]}..." if len(access_token) > 10 else access_token
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -268,8 +254,17 @@ def auth_callback() -> str:
 
 def start_auth_server_and_wait(broker_config: BrokerConfig, auth_server_config: AuthServerConfig) -> bool:
     global global_token_manager_instance, global_authenticator_instance
+    global auth_success_event, auth_error_event, auth_result
 
     logger.info("Initializing authentication process...")
+
+    # CRITICAL FIX: Reset global authentication events and result
+    logger.info("Resetting authentication events from previous attempts...")
+    auth_success_event.clear()
+    auth_error_event.clear()
+    auth_result = {"success": False, "message": ""}
+    logger.info("Authentication events reset complete")
+
     try:
         global_token_manager_instance = TokenManager()
         global_authenticator_instance = KiteAuthenticator(broker_config)
@@ -346,9 +341,18 @@ def start_auth_server_and_wait(broker_config: BrokerConfig, auth_server_config: 
         logger.info(f"Waiting for authentication to complete. Timeout is set to {timeout} seconds.")
 
         # Wait for either success or error event
+        check_count = 0
         while timeout > 0:
+            check_count += 1
+
+            # Log periodic status every 10 seconds
+            if check_count % 10 == 0:
+                logger.info(
+                    f"⏰ Authentication status check #{check_count}: {timeout}s remaining, success={auth_success_event.is_set()}, error={auth_error_event.is_set()}"
+                )
+
             if auth_success_event.is_set():
-                logger.info("Authentication completed successfully!")
+                logger.info("🎉 Authentication completed successfully!")
                 # Ensure server is shut down before returning
                 if server:
                     server.shutdown()
@@ -357,8 +361,20 @@ def start_auth_server_and_wait(broker_config: BrokerConfig, auth_server_config: 
                         logger.warning("Server thread did not shut down gracefully.")
                 return True
             if auth_error_event.is_set():
-                logger.error("Authentication failed with error.")
+                logger.error("❌ Authentication failed with error.")
                 return False
+
+            # FALLBACK: Check if token was actually saved (in case event mechanism fails)
+            if global_token_manager_instance and global_token_manager_instance.is_token_available():
+                logger.warning("🔍 Token detected via fallback check - event mechanism may have failed")
+                logger.info("🎉 Authentication completed successfully (via fallback detection)!")
+                # Ensure server is shut down before returning
+                if server:
+                    server.shutdown()
+                    server.join(timeout=5)
+                    if server.is_alive():
+                        logger.warning("Server thread did not shut down gracefully.")
+                return True
             time.sleep(1)  # Using time.sleep instead of await asyncio.sleep
             timeout -= 1
 

@@ -1,3 +1,5 @@
+import json
+
 import asyncpg
 
 from src.database.db_utils import DatabaseManager
@@ -38,9 +40,15 @@ class LabelingStatsRepository:
                 stats_data.timeframe,
                 stats_data.total_bars,
                 stats_data.labeled_bars,
-                stats_data.label_distribution,
-                stats_data.avg_return_by_label,
-                stats_data.exit_reasons,
+                json.dumps(stats_data.label_distribution)
+                if isinstance(stats_data.label_distribution, dict)
+                else stats_data.label_distribution,
+                json.dumps(stats_data.avg_return_by_label)
+                if isinstance(stats_data.avg_return_by_label, dict)
+                else stats_data.avg_return_by_label,
+                json.dumps(stats_data.exit_reasons)
+                if isinstance(stats_data.exit_reasons, dict)
+                else stats_data.exit_reasons,
                 stats_data.avg_holding_period,
                 stats_data.processing_time_ms,
                 stats_data.data_quality_score,
@@ -55,5 +63,8 @@ class LabelingStatsRepository:
                 f"A labeling statistics record for {stats_data.symbol} at {stats_data.run_timestamp} already exists. Skipping insertion."
             )
         except Exception as e:
-            logger.error(f"Database error inserting labeling statistics for {stats_data.symbol}: {e}", exc_info=True)
+            safe_error = str(e).replace("{", "{{").replace("}", "}}")
+            logger.error(
+                f"Database error inserting labeling statistics for {stats_data.symbol}: {safe_error}", exc_info=True
+            )
             raise RuntimeError("Failed to insert labeling statistics.") from e

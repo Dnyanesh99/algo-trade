@@ -16,6 +16,23 @@ class SARIndicator(BaseIndicator):
     def __init__(self, config: IndicatorConfig):
         super().__init__(config)
 
+    def validate_data(self, df: pd.DataFrame) -> bool:
+        """Validate input data. SAR only requires high and low columns."""
+        if df.empty:
+            return False
+
+        # SAR only needs high and low columns
+        required_columns = ["high", "low"]
+        missing_columns = [col for col in required_columns if col not in df.columns]
+
+        if missing_columns:
+            raise RuntimeError(
+                f"CRITICAL TRADING SYSTEM FAILURE: Indicator {self.name} cannot proceed - "
+                f"missing required data columns: {missing_columns}. Trading signal integrity compromised."
+            )
+
+        return True
+
     def calculate_talib(self, df: pd.DataFrame, params: dict[str, Any]) -> pd.Series:
         """Calculate SAR using TA-Lib."""
         if self.talib is None:
@@ -35,7 +52,8 @@ class SARIndicator(BaseIndicator):
             return pd.Series([float("nan")] * len(df), index=df.index)
 
         try:
-            return self.talib.SAR(df["high"].values, df["low"].values, acceleration=increment, maximum=maximum)
+            sar_values = self.talib.SAR(df["high"].values, df["low"].values, acceleration=increment, maximum=maximum)
+            return pd.Series(sar_values, index=df.index)
         except Exception as e:
             logger.error(f"SAR calculation failed for {len(df)} data points with params {params}: {e}")
             return pd.Series([float("nan")] * len(df), index=df.index)

@@ -40,6 +40,7 @@ from src.state.health_monitor import HealthMonitor
 from src.state.system_state import SystemState
 from src.utils.config_loader import ConfigLoader
 from src.utils.dependency_container import HistoricalPipelineDependencies
+from src.utils.env_utils import get_bool_env
 from src.utils.historical_pipeline_manager import HistoricalPipelineManager
 from src.utils.live_pipeline_manager import LivePipelineManager
 from src.utils.logger import LOGGER as logger
@@ -69,9 +70,18 @@ async def ensure_valid_authentication(token_manager: TokenManager, config: Any) 
         logger.info("✅ Access token is valid. Proceeding with application startup.")
         return True
 
-    # Step 3: Token is invalid, initiate re-authentication
-    logger.warning("❌ Access token is invalid or expired. Initiating authentication flow.")
-    # Note: We don't clear the token file to preserve it across restarts
+    # Step 3: Token is invalid/expired, clear it and get fresh token
+    logger.warning(
+        "❌ Access token is invalid or expired. Clearing old token and initiating fresh authentication flow."
+    )
+
+    # Clear the invalid token so we don't keep trying to use it
+    try:
+        token_manager.clear_tokens()
+        logger.info("🗑️ Cleared invalid token from storage")
+    except Exception as e:
+        logger.warning(f"Failed to clear invalid token: {e}")
+
     return await perform_authentication(token_manager, config)
 
 
@@ -392,7 +402,8 @@ async def initialize_historical_mode_enhanced(
         )
 
     except Exception as e:
-        logger.critical(f"Error in enhanced historical mode: {e}", exc_info=True)
+        safe_error = str(e).replace("{", "{{").replace("}", "}}")
+        logger.critical(f"Error in enhanced historical mode: {safe_error}", exc_info=True)
         await error_handler.handle_error(
             "enhanced_historical_pipeline", f"Enhanced processing failed: {e}", {"error": str(e)}
         )
@@ -845,7 +856,7 @@ async def main_async() -> None:
 
     if config.system.mode == "HISTORICAL_MODE":
         # Check for smart processing mode via environment variable
-        use_smart_processing = os.getenv("USE_SMART_PROCESSING", "true").lower() == "true"
+        use_smart_processing = get_bool_env("USE_SMART_PROCESSING", True)
 
         if use_smart_processing:
             logger.info("🧠 USE_SMART_PROCESSING=true - Using enhanced state-aware processing")
@@ -883,7 +894,8 @@ def main() -> None:
     except KeyboardInterrupt:
         logger.info("System interrupted by user. Shutting down.")
     except Exception as e:
-        logger.critical(f"Unhandled exception at top level: {e}", exc_info=True)
+        safe_error = str(e).replace("{", "{{").replace("}", "}}")
+        logger.critical(f"Unhandled exception at top level: {safe_error}", exc_info=True)
     finally:
         logger.complete()
 

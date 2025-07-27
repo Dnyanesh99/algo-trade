@@ -115,6 +115,7 @@ class LabelingResult:
     exit_reasons: NDArray[np.int8]
     mfe: NDArray[np.float64]
     mae: NDArray[np.float64]
+    path_adjusted_returns: NDArray[np.float64]  # Added: path-adjusted returns for transparency
 
 
 class OptimizedTripleBarrierLabeler:
@@ -268,8 +269,9 @@ class OptimizedTripleBarrierLabeler:
         atr_rolling_mean = atr_series.rolling(window=self.config.volatility_lookback, min_periods=1).mean()
 
         with np.errstate(divide="ignore", invalid="ignore"):
-            division_result = atr_series / atr_rolling_mean
-            atr_ratio = np.where(atr_rolling_mean > 0, division_result, 1.0)
+            # Ensure aligned indices for Series operations
+            division_result = atr_series.values / atr_rolling_mean.values
+            atr_ratio = np.where(atr_rolling_mean.values > 0, division_result, 1.0)
 
         regime_conditions = [
             atr_ratio < cfg.low_volatility_threshold,
@@ -297,12 +299,29 @@ class OptimizedTripleBarrierLabeler:
             day_of_week = ist_timestamps.dayofweek.values
 
             session_cfg = cfg.market_session_times
+            # Map session names to multiplier names in config
+            session_multiplier_map = {
+                "opening": "market_open_multiplier",
+                "pre_lunch": "pre_lunch_multiplier",
+                "closing": "market_close_multiplier",
+            }
+
             for session in ["opening", "pre_lunch", "closing"]:
-                start_time = time.fromisoformat(session_cfg[session]["start"])
-                end_time = time.fromisoformat(session_cfg[session]["end"])
+                # session_cfg is a dict[str, MarketSessionTime]
+                if session in session_cfg:
+                    session_obj = session_cfg[session]
+                    start_time = time.fromisoformat(session_obj.start)
+                    end_time = time.fromisoformat(session_obj.end)
+                else:
+                    logger.warning(f"Session '{session}' not found in market_session_times config")
+                    continue
                 mask = (hours > start_time.hour) | ((hours == start_time.hour) & (minutes >= start_time.minute))
                 mask &= (hours < end_time.hour) | ((hours == end_time.hour) & (minutes <= end_time.minute))
-                time_multipliers = np.where(mask, cfg[f"{session}_multiplier"], time_multipliers)
+
+                # Use the correct multiplier name from config
+                multiplier_name = session_multiplier_map[session]
+                multiplier_value = getattr(cfg, multiplier_name)
+                time_multipliers = np.where(mask, multiplier_value, time_multipliers)
 
             time_multipliers = np.where(day_of_week == 0, time_multipliers * cfg.monday_multiplier, time_multipliers)
             weekly_expiry_mask = day_of_week == cfg.weekly_expiry_day
@@ -314,7 +333,7 @@ class OptimizedTripleBarrierLabeler:
             )
 
         atr_rolling_std = atr_series.rolling(window=self.config.volatility_lookback, min_periods=1).std().fillna(0)
-        volatility_zscore = (atr_series - atr_rolling_mean) / (atr_rolling_std + 1e-10)
+        volatility_zscore = (atr_series.values - atr_rolling_mean.values) / (atr_rolling_std.values + 1e-10)
         abs_zscore = np.abs(volatility_zscore)
         zscore_conditions = [
             abs_zscore > cfg.extreme_zscore_threshold,
@@ -343,8 +362,12 @@ class OptimizedTripleBarrierLabeler:
         df = pd.DataFrame({"timestamp": timestamps})
         df["month_str"] = df["timestamp"].dt.strftime("%Y-%m")
         df["is_expiry_day"] = df["timestamp"].dt.dayofweek == weekly_expiry_day
-        last_expiry_day_of_month = df[df["is_expiry_day"]].groupby("month_str")["timestamp"].transform("max")
-        return (df["timestamp"] == last_expiry_day_of_month).values
+
+        # Get the max expiry day for each month, then map back to full DataFrame
+        monthly_expiry_dates = df[df["is_expiry_day"]].groupby("month_str")["timestamp"].max()
+        df["monthly_expiry_date"] = df["month_str"].map(monthly_expiry_dates)
+
+        return (df["timestamp"] == df["monthly_expiry_date"]).fillna(False).values
 
     def _calculate_dynamic_barriers(
         self, df: pd.DataFrame, atr: NDArray[np.float64]
@@ -357,7 +380,7 @@ class OptimizedTripleBarrierLabeler:
         atr_series = pd.Series(valid_atr, index=df.index)
         vol_mean = atr_series.rolling(window=self.config.volatility_lookback, min_periods=1).mean()
         vol_std = atr_series.rolling(window=self.config.volatility_lookback, min_periods=1).std().fillna(0)
-        vol_zscore = (atr_series - vol_mean) / (vol_std + 1e-10)
+        vol_zscore = (atr_series.values - vol_mean.values) / (vol_std.values + 1e-10)
 
         tp_multiplier = self.config.tp_atr_multiplier * (
             1 + self.config.dynamic_barrier_tp_sensitivity * np.tanh(vol_zscore)
@@ -365,7 +388,7 @@ class OptimizedTripleBarrierLabeler:
         sl_multiplier = self.config.sl_atr_multiplier * (
             1 + self.config.dynamic_barrier_sl_sensitivity * np.tanh(vol_zscore)
         )
-        return tp_multiplier.values, sl_multiplier.values
+        return tp_multiplier, sl_multiplier
 
     @staticmethod
     @jit(nopython=True, parallel=True, cache=True, fastmath=True)  # type: ignore[misc]
@@ -389,6 +412,7 @@ class OptimizedTripleBarrierLabeler:
         NDArray[np.int8],
         NDArray[np.float64],
         NDArray[np.float64],
+        NDArray[np.float64],  # Added: path_adjusted_returns
     ]:
         n = len(entry_prices)
         labels = np.zeros(n, dtype=np.int8)
@@ -397,6 +421,7 @@ class OptimizedTripleBarrierLabeler:
         exit_reasons = np.full(n, ExitReason.INSUFFICIENT_DATA, dtype=np.int8)
         mfe = np.zeros(n, dtype=np.float64)
         mae = np.zeros(n, dtype=np.float64)
+        path_adjusted_returns = np.zeros(n, dtype=np.float64)  # Track path-adjusted returns
 
         for i in prange(n):
             if np.isnan(tp_prices[i]) or np.isnan(sl_prices[i]) or np.isnan(entry_prices[i]) or entry_prices[i] <= 0:
@@ -423,16 +448,24 @@ class OptimizedTripleBarrierLabeler:
                     open_to_sl = abs(open_[bar_idx] - sl_prices[i])
                     if open_to_tp < open_to_sl:
                         labels[i], exit_reasons[i], exit_prices[i] = Label.BUY, ExitReason.TP_HIT, tp_prices[i]
+                        # CRITICAL FIX: Set path_adjusted_return for TP_HIT cases
+                        path_adjusted_returns[i] = (tp_prices[i] - entry_prices[i]) / entry_prices[i]
                     else:
                         labels[i], exit_reasons[i], exit_prices[i] = Label.SELL, ExitReason.SL_HIT, sl_prices[i]
+                        # CRITICAL FIX: Set path_adjusted_return for SL_HIT cases
+                        path_adjusted_returns[i] = (sl_prices[i] - entry_prices[i]) / entry_prices[i]
                     exit_bar_offsets[i] = j
                     break
                 if tp_hit:
                     labels[i], exit_reasons[i], exit_prices[i] = Label.BUY, ExitReason.TP_HIT, tp_prices[i]
+                    # CRITICAL FIX: Set path_adjusted_return for TP_HIT cases
+                    path_adjusted_returns[i] = (tp_prices[i] - entry_prices[i]) / entry_prices[i]
                     exit_bar_offsets[i] = j
                     break
                 if sl_hit:
                     labels[i], exit_reasons[i], exit_prices[i] = Label.SELL, ExitReason.SL_HIT, sl_prices[i]
+                    # CRITICAL FIX: Set path_adjusted_return for SL_HIT cases
+                    path_adjusted_returns[i] = (sl_prices[i] - entry_prices[i]) / entry_prices[i]
                     exit_bar_offsets[i] = j
                     break
 
@@ -444,7 +477,17 @@ class OptimizedTripleBarrierLabeler:
 
                 if path_dependent_timeout_enabled:
                     total_range = mfe[i] - mae[i]
-                    path_adjusted_return = ((final_return - mae[i]) / total_range * 2 - 1) if total_range > 1e-9 else 0
+                    if total_range > 1e-9:
+                        # CORRECTED: Proper path-dependent normalization per De Prado AFML
+                        # Normalize final_return position within [MAE, MFE] range to [0,1], then to [-1,+1]
+                        relative_position = (final_return - mae[i]) / total_range
+                        path_adjusted_return = (relative_position * 2.0) - 1.0
+                    else:
+                        # If no range (MAE == MFE), treat as neutral
+                        path_adjusted_return = 0.0
+
+                    path_adjusted_returns[i] = path_adjusted_return
+
                     if path_adjusted_return > timeout_upper_thresh:
                         labels[i] = Label.BUY
                     elif path_adjusted_return < timeout_lower_thresh:
@@ -452,7 +495,10 @@ class OptimizedTripleBarrierLabeler:
                     else:
                         labels[i] = Label.NEUTRAL
                 else:
+                    # Standard epsilon-based labeling for timeout cases
                     current_epsilon = epsilon_array[i]
+                    path_adjusted_returns[i] = final_return  # Store actual return for consistency
+
                     if final_return > current_epsilon:
                         labels[i] = Label.BUY
                     elif final_return < -current_epsilon:
@@ -460,7 +506,7 @@ class OptimizedTripleBarrierLabeler:
                     else:
                         labels[i] = Label.NEUTRAL
 
-        return labels, exit_bar_offsets, exit_prices, exit_reasons, mfe, mae
+        return labels, exit_bar_offsets, exit_prices, exit_reasons, mfe, mae, path_adjusted_returns
 
     def _prepare_labels_dataframe(
         self,
@@ -494,6 +540,7 @@ class OptimizedTripleBarrierLabeler:
                 "tp_price": tp_prices,
                 "sl_price": sl_prices,
                 "barrier_return": barrier_returns,
+                "path_adjusted_return": results.path_adjusted_returns,  # Added: for consistency analysis
                 "max_favorable_excursion": results.mfe,
                 "max_adverse_excursion": results.mae,
                 "risk_reward_ratio": risk_reward_ratio,
@@ -539,11 +586,14 @@ class OptimizedTripleBarrierLabeler:
                 f"Insufficient non-NaN data for {symbol}: {len(df_essential)} < {self.config.min_bars_required}."
             )
 
+        # Use the cleaned data for all subsequent processing
+        df_clean = df.dropna(subset=essential_cols)
+
         price_cols = ["open", "high", "low", "close"]
-        if not np.isfinite(df[price_cols].values).all() or (df[price_cols] <= 0).any().any():
+        if not np.isfinite(df_clean[price_cols].values).all() or (df_clean[price_cols] <= 0).any().any():
             raise RuntimeError(f"Non-finite or non-positive prices found for {symbol}.")
 
-        df_sorted = df.sort_values("timestamp").reset_index(drop=True)
+        df_sorted = df_clean.sort_values("timestamp").reset_index(drop=True)
         if df_sorted["timestamp"].duplicated().any():
             logger.warning(f"Duplicate timestamps found for {symbol}. Dropping duplicates.")
             df_sorted = df_sorted.drop_duplicates(subset=["timestamp"], keep="first")
@@ -561,9 +611,30 @@ class OptimizedTripleBarrierLabeler:
         # CRITICAL FIX: Prevent lookahead bias by using ATR from the previous bar.
         atr_at_entry = df["atr"].shift(1).values
 
+        # Fix NaN in first position by using current ATR (acceptable for first bar)
+        first_valid_atr_idx = np.argmax(~np.isnan(df["atr"].values))
+        if np.isnan(atr_at_entry[0]) and first_valid_atr_idx < len(df):
+            atr_at_entry[0] = df["atr"].values[first_valid_atr_idx]
+
+        # Forward fill any remaining NaN values in atr_at_entry
+        atr_series = pd.Series(atr_at_entry)
+        atr_at_entry = atr_series.fillna(method="ffill").fillna(method="bfill").values
+
         tp_multipliers, sl_multipliers = self._calculate_dynamic_barriers(df, atr_at_entry)
         tp_prices = entry_prices + tp_multipliers * atr_at_entry
         sl_prices = entry_prices - sl_multipliers * atr_at_entry
+
+        # Validate that we don't have NaN barriers (except for intentionally invalidated last entry)
+        nan_tp_mask = np.isnan(tp_prices[:-1])  # Exclude last entry which is intentionally NaN
+        nan_sl_mask = np.isnan(sl_prices[:-1])  # Exclude last entry which is intentionally NaN
+
+        if nan_tp_mask.any() or nan_sl_mask.any():
+            nan_indices = np.where(nan_tp_mask | nan_sl_mask)[0]
+            logger.warning(f"Found NaN barrier prices at indices {nan_indices}. Setting to invalid.")
+            # Mark these entries as invalid by setting entry_prices to NaN
+            entry_prices[nan_indices] = np.nan
+            tp_prices[nan_indices] = np.nan
+            sl_prices[nan_indices] = np.nan
 
         dynamic_epsilon_array = self._calculate_dynamic_epsilon(df, atr_at_entry)
         epsilon_array = np.nan_to_num(dynamic_epsilon_array, nan=self.config.epsilon)

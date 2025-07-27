@@ -60,6 +60,7 @@ class LabelRepository:
                 d.exit_reason,
                 d.exit_bar_offset,
                 d.barrier_return,
+                d.path_adjusted_return,
                 d.max_favorable_excursion,
                 d.max_adverse_excursion,
                 d.risk_reward_ratio,

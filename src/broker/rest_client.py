@@ -195,7 +195,7 @@ class KiteRESTClient:
                     response.raise_for_status()  # Will raise for 4xx/5xx responses
 
                 logger.info("Successfully downloaded instruments CSV. Parsing...")
-                
+
                 # Handle both gzipped and already-decompressed responses
                 try:
                     # Try to decompress first (in case it's still gzipped)
