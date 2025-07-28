@@ -591,16 +591,17 @@ model_training:
     verbose: -1
     seed: 42
     deterministic: true
-    num_leaves: 31
-    learning_rate: 0.05
-    feature_fraction: 0.9
-    bagging_fraction: 0.8
-    bagging_freq: 5
-    min_child_samples: 20
-    lambda_l1: 0.1
-    lambda_l2: 0.1
-    max_depth: -1
-    min_gain_to_split: 0.0
+    # Multi-timeframe optimized parameters (3x more features: ~102 vs ~34)
+    num_leaves: 63                 # Increased from 31 to handle more complex feature interactions
+    learning_rate: 0.03            # Reduced from 0.05 for better generalization with more features
+    feature_fraction: 0.7          # Reduced from 0.9 to prevent overfitting with 102 features
+    bagging_fraction: 0.8          # Kept stable for good variance reduction
+    bagging_freq: 5                # Kept stable
+    min_child_samples: 30          # Increased from 20 for better generalization
+    lambda_l1: 0.2                 # Increased from 0.1 for stronger L1 regularization
+    lambda_l2: 0.2                 # Increased from 0.1 for stronger L2 regularization
+    max_depth: 8                   # Set explicit depth limit (was -1) to prevent overfitting
+    min_gain_to_split: 0.01        # Increased from 0.0 to require meaningful splits
   
   # ──────────────────────────────────────────────────────────────────────────
   # HYPERPARAMETER OPTIMIZATION
@@ -608,18 +609,18 @@ model_training:
   # ──────────────────────────────────────────────────────────────────────────
   optimization:
     enabled: true
-    n_trials: 50
+    n_trials: 75                     # Increased from 50 for better hyperparameter search with more features
     test_size: 2000
     n_estimators_range: [100, 1000]
-    learning_rate_range: [0.001, 0.1]
-    num_leaves_range: [20, 300]
-    max_depth_range: [3, 12]
-    min_child_samples_range: [5, 100]
-    feature_fraction_range: [0.4, 1.0]
-    bagging_fraction_range: [0.4, 1.0]
-    bagging_freq_range: [1, 7]
-    lambda_l1_range: [1.0e-8, 10.0]
-    lambda_l2_range: [1.0e-8, 10.0]
+    learning_rate_range: [0.001, 0.08]  # Reduced upper bound from 0.1 for multi-timeframe stability
+    num_leaves_range: [31, 127]         # Adjusted range: start from 31, max 127 for 102 features
+    max_depth_range: [6, 12]            # Increased lower bound from 3 to handle feature complexity
+    min_child_samples_range: [15, 50]   # Adjusted range for better generalization with more features
+    feature_fraction_range: [0.5, 0.8]  # Reduced range from [0.4, 1.0] - crucial for 102 features
+    bagging_fraction_range: [0.6, 0.9]  # Tightened range from [0.4, 1.0] for stability
+    bagging_freq_range: [3, 7]          # Increased lower bound from 1 for better variance reduction
+    lambda_l1_range: [0.05, 2.0]        # Adjusted from [1e-8, 10.0] - stronger regularization needed
+    lambda_l2_range: [0.05, 2.0]        # Adjusted from [1e-8, 10.0] - stronger regularization needed
     roc_auc_multi_class: "ovr"
     roc_auc_average: "weighted"
     early_stopping_rounds: 50
@@ -649,9 +650,9 @@ model_training:
   feature_ranges:
     rsi_14: [0, 100]
     bb_position: [-3, 3]
-    macd_macd: [-50, 50]
-    macd_signal: [-50, 50]
-    macd_hist: [-30, 30]
+    macd_macd: [-500, 500]     # Expanded for indices (NIFTY ~20k levels)
+    macd_signal: [-500, 500]   # Expanded for indices 
+    macd_hist: [-300, 300]     # Expanded for indices
     stoch_k: [0, 100]
     stoch_d: [0, 100]
     stoch_momentum_divergence: [-100, 100]
@@ -665,7 +666,7 @@ model_training:
     momentum_ratio_20d: [-1, 1]
     momentum_ratio_50d: [-1, 1]
     rsi_momentum_normalized: [-1, 1]
-    macd_momentum_strength: [0, 5]
+    macd_momentum_strength: [0, 5]  # Percentage-based: 0-5% of MACD value (instrument-agnostic)
     volatility_adjusted_return: [-10, 10]
     vol_adjusted_bb_position: [-5, 5]
     trend_strength_normalized: [0, 2]
@@ -954,7 +955,7 @@ data_quality:
       
       # Oscillator consistency checks
       oscillator_consistency:
-        stochastic_volatility_ratio: 1.5  # %D should be smoother than %K
+        stochastic_volatility_ratio: 2.5  # %D should be smoother than %K (relaxed for volatile markets)
         rsi_correlation_threshold: 0.8     # Different RSI periods should be correlated
       
       # Bollinger Bands ordering validation

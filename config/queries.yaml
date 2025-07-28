@@ -28,6 +28,67 @@ feature_repo:
     LEFT JOIN labels l ON f.ts = l.ts AND f.instrument_id = l.instrument_id AND f.timeframe = l.timeframe
     WHERE f.instrument_id = $1 AND f.timeframe = $2 AND f.ts BETWEEN $3 AND $4
     ORDER BY f.ts, f.feature_name
+  get_multiframe_training_data: |
+    WITH labeled_timestamps AS (
+        SELECT ts, label
+        FROM labels
+        WHERE instrument_id = $1
+          AND timeframe = $2
+          AND ts BETWEEN $3 AND $4
+    ),
+    timeframe_aligned_features AS (
+        SELECT
+            lt.ts,
+            lt.label,
+            f.timeframe || '_' || f.feature_name AS feature_key,
+            f.feature_value
+        FROM labeled_timestamps lt
+        CROSS JOIN LATERAL (
+            -- 15min features (exact timestamp match)
+            SELECT '15min' AS timeframe, feature_name, feature_value
+            FROM features
+            WHERE instrument_id = $1
+              AND timeframe = '15min'
+              AND ts = lt.ts
+
+            UNION ALL
+
+            -- 5min features (latest available before or at label time)
+            SELECT '5min' AS timeframe, feature_name, feature_value
+            FROM features f5
+            WHERE f5.instrument_id = $1
+              AND f5.timeframe = '5min'
+              AND f5.ts = (
+                  SELECT MAX(ts)
+                  FROM features
+                  WHERE instrument_id = $1
+                    AND timeframe = '5min'
+                    AND ts <= lt.ts
+              )
+
+            UNION ALL
+
+            -- 60min features (latest available before or at label time)
+            SELECT '60min' AS timeframe, feature_name, feature_value
+            FROM features f60
+            WHERE f60.instrument_id = $1
+              AND f60.timeframe = '60min'
+              AND f60.ts = (
+                  SELECT MAX(ts)
+                  FROM features
+                  WHERE instrument_id = $1
+                    AND timeframe = '60min'
+                    AND ts <= lt.ts
+              )
+        ) f
+    )
+    SELECT
+        ts,
+        label,
+        feature_key,
+        feature_value
+    FROM timeframe_aligned_features
+    ORDER BY ts, feature_key
   insert_engineered_features: |
     INSERT INTO engineered_features
     (instrument_id, timeframe, timestamp, feature_name, feature_value,
