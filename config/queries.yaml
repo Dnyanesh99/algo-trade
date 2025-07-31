@@ -218,15 +218,32 @@ model_registry:
   insert_model: |
     INSERT INTO model_registry 
     (version, training_end_date, accuracy, f1_score, sharpe_ratio, max_drawdown, 
-     total_signals, profitable_signals, config, is_active)
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+     total_signals, profitable_signals, config, is_active, instrument_id, model_type, 
+     timeframe, deployment_status, feature_count, feature_names, model_file_path, 
+     metadata_file_path, training_start_date, training_duration_seconds, 
+     feature_importance, model_size_mb, training_data_start_date, training_data_end_date,
+     training_samples_count, validation_samples_count, test_samples_count)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, 
+            $18, $19, $20, $21, $22, $23, $24, $25, $26, $27)
     RETURNING id
   get_active_model: |
     SELECT id, version, created_at, training_end_date, accuracy, f1_score, 
-           sharpe_ratio, max_drawdown, total_signals, profitable_signals, config
+           sharpe_ratio, max_drawdown, total_signals, profitable_signals, config,
+           instrument_id, model_type, timeframe, deployment_status, feature_count,
+           feature_names, model_file_path, metadata_file_path, training_start_date,
+           training_duration_seconds, feature_importance, model_size_mb
     FROM model_registry 
     WHERE is_active = TRUE
     LIMIT 1
+  get_active_models: |
+    SELECT id, version, created_at, training_end_date, accuracy, f1_score, 
+           sharpe_ratio, max_drawdown, total_signals, profitable_signals, config,
+           instrument_id, model_type, timeframe, deployment_status, feature_count,
+           feature_names, model_file_path, metadata_file_path, training_start_date,
+           training_duration_seconds, feature_importance, model_size_mb
+    FROM model_registry 
+    WHERE is_active = TRUE
+    ORDER BY created_at DESC
   get_model_by_version: |
     SELECT id, version, created_at, training_end_date, accuracy, f1_score,
            sharpe_ratio, max_drawdown, total_signals, profitable_signals, config, is_active
@@ -242,6 +259,26 @@ model_registry:
     UPDATE model_registry SET is_active = FALSE WHERE is_active = TRUE
   activate_model: |
     UPDATE model_registry SET is_active = TRUE WHERE version = $1
+  get_previous_active_model: |
+    SELECT id, version, created_at, training_end_date, accuracy, f1_score,
+           sharpe_ratio, max_drawdown, total_signals, profitable_signals, config, is_active
+    FROM model_registry 
+    WHERE created_at < (SELECT created_at FROM model_registry WHERE version = $1)
+    ORDER BY created_at DESC
+    LIMIT 1
+  rollback_to_previous: |
+    WITH previous_model AS (
+      SELECT version FROM model_registry 
+      WHERE created_at < (SELECT created_at FROM model_registry WHERE version = $1)
+      ORDER BY created_at DESC
+      LIMIT 1
+    )
+    UPDATE model_registry 
+    SET is_active = CASE 
+      WHEN version = (SELECT version FROM previous_model) THEN TRUE
+      ELSE FALSE
+    END
+    RETURNING (SELECT version FROM previous_model) as activated_version
 
 chart_repo:
   get_chart_data: |

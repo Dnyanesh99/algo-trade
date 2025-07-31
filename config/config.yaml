@@ -148,6 +148,59 @@ broker:
     monitor_interval: 10            # seconds
 
 # ============================================================================
+# UPSTOX INTEGRATION
+# Upstox API v2 configuration for expired contracts data fetching
+# Controlled by UPSTOX_DATA_ENABLED environment variable
+# ============================================================================
+upstox:
+  # Underlying Instruments (instrument keys from Upstox API)
+  underlying_instruments:
+    - "NIFTY 50"           # NIFTY options/futures
+
+  # Processing Configuration - CRITICAL: Controls data volume!
+  processing:
+    # ⚠️ MOST IMPORTANT PARAMETER ⚠️
+    # Each expiry typically has ~100 option contracts (50 strikes × 2 types)
+    # Examples: 1=~100 contracts, 3=~300 contracts, 6=~600 contracts
+    max_expiries_per_instrument: 6   # Number of recent expiries to process
+    
+    # Contract Types to Process
+    contract_types:                  # Types of contracts to fetch
+      - "option"                     # CE/PE options
+      # - "future"                   # Futures (uncomment if needed)
+    
+    # Data Range Configuration
+    interval: "1minute"              # Data interval for historical candles
+    months_back: 6                   # Historical data range in months
+
+  # Rate Limiting Configuration (Respect Upstox API limits)
+  rate_limits:
+    # General API endpoints rate limiting
+    general_api:
+      requests_per_second: 10        # API requests per second
+      
+    # Historical data endpoints rate limiting  
+    historical_data:
+      requests_per_second: 5         # Historical data requests per second
+      
+    # Sleep intervals between requests (in seconds)
+    contract_fetch_delay: 0.5        # Delay between contract fetching
+    historical_data_delay: 2.0       # Delay between historical data requests
+    batch_processing_delay: 0.3      # Delay between batch processing
+
+  # Data Quality Control
+  data_quality:
+    min_contracts_per_group: 2       # Minimum contracts required for stitching
+    max_groups_per_instrument: 50    # Limit groups to prevent excessive processing
+    validate_ohlc: true              # Validate OHLC data relationships
+
+  # Database Configuration
+  database:
+    table_name: "ohlcv_1min"         # TimescaleDB table name for storage
+    append_mode: true                # Append to existing data (don't overwrite)
+    batch_size: 1000                 # Records per batch insert operation
+
+# ============================================================================
 # LOGGING CONFIGURATION
 # System-wide logging settings for debugging and monitoring
 # ============================================================================
@@ -175,33 +228,32 @@ trading:
   # ──────────────────────────────────────────────────────────────────────────
   labeling:
     # ATR (Average True Range) Settings
-    atr_period: 14
-    tp_atr_multiplier: 2.0        # Take profit barrier multiplier
-    sl_atr_multiplier: 1.5        # Stop loss barrier multiplier
+    atr_period: 10                # Reduced from 14 for more responsive intraday signals
+    tp_atr_multiplier: 2.5        # Increased from 2.0 for better risk-reward (2.5:1.5 = 1.67:1)
+    sl_atr_multiplier: 1.5        # Keep existing stop loss
     atr_smoothing: "ema"           # Options: "ema", "sma"
     
-    # Barrier Configuration
-    # Barrier Configuration
-    max_holding_periods: 10
+    # Barrier Configuration - REBALANCED FOR BETTER CLASS DISTRIBUTION
+    max_holding_periods: 12       # Increased from 10 to allow more meaningful price movements
     min_bars_required: 100
-    epsilon: 0.0015  # 0.15% neutral zone for TIME_OUT cases (optimized for NIFTY intraday volatility)
+    epsilon: 0.0025               # Increased from 0.0015 (0.25% vs 0.15%) for more NEUTRAL labels
     use_dynamic_barriers: true
-    use_dynamic_epsilon: true  # Enable dynamic epsilon based on volatility regime
+    use_dynamic_epsilon: true     # Enable dynamic epsilon based on volatility regime
     volatility_lookback: 20
 
-    # Path-dependent timeout logic (De Prado, AFML)
+    # Path-dependent timeout logic (De Prado, AFML) - WIDENED THRESHOLDS
     path_dependent_timeout:
       enabled: true
-      upper_threshold: 0.5  # Normalized position in range for BUY label
-      lower_threshold: -0.5 # Normalized position in range for SELL label
+      upper_threshold: 0.7        # Increased from 0.5 to reduce BUY labels from timeouts
+      lower_threshold: -0.7       # Decreased from -0.5 to reduce SELL labels from timeouts
     
-    # Dynamic Epsilon Configuration
+    # Dynamic Epsilon Configuration - REBALANCED
     dynamic_epsilon:
       # Volatility regime multipliers (applied to base epsilon)
-      low_volatility_multiplier: 1.5      # ATR < 0.5 * rolling_mean
-      normal_volatility_multiplier: 1.0    # 0.5-1.5 * rolling_mean  
-      high_volatility_multiplier: 0.7      # 1.5-2.5 * rolling_mean
-      extreme_volatility_multiplier: 2.0   # > 2.5 * rolling_mean
+      low_volatility_multiplier: 1.2      # Reduced from 1.5 - less epsilon expansion in low vol
+      normal_volatility_multiplier: 1.0    # Keep same  
+      high_volatility_multiplier: 0.8      # Increased from 0.7 - less epsilon shrinking in high vol
+      extreme_volatility_multiplier: 2.0   # Keep same
       
       # Volatility regime thresholds (ratios to rolling ATR mean)
       low_volatility_threshold: 0.5
@@ -441,13 +493,14 @@ trading:
       - name: momentumratios
         function: MOMENTUM_RATIOS
         params:
-          default: { lookback_periods: [5, 10, 20], min_data_length: 20, normalization_constant: 50 }
-          60m: { lookback_periods: [5, 10, 20, 50] }
+          default: { lookback_periods: [5, 10, 20], min_data_length: 20, normalization_constant: 50, epsilon: 1e-9, max_momentum_ratio: 1.0 }
+          60m: { lookback_periods: [5, 10, 20, 50], min_data_length: 50 }
       
       - name: volatilityadjustments
         function: VOLATILITY_ADJUSTMENTS
         params:
-          default: { min_data_length: 2 }
+          default: { min_data_length: 2, epsilon: 1e-9 }
+          60m: { min_data_length: 3 }
       
       - name: trendconfirmations
         function: TREND_CONFIRMATIONS
@@ -464,7 +517,8 @@ trading:
       - name: breakoutindicators
         function: BREAKOUT_INDICATORS
         params:
-          default: { min_data_length: 20, volume_lookback_short: 5, volume_lookback_long: 20, volume_ratio_max: 2.0 }
+          default: { min_data_length: 20, volume_lookback_short: 5, volume_lookback_long: 20, volume_ratio_max: 2.0, epsilon: 1e-9, max_breakout_strength: 0.5, volume_significance_threshold: 0.1 }
+          60m: { volume_lookback_short: 10, volume_lookback_long: 40 }
     
     # Feature Name Mapping for Output Standardization
     name_mapping:
@@ -480,6 +534,7 @@ trading:
       obv_obv_signal: "obv_signal"
 
     # Internal Feature Mapping for Enhanced Indicators
+    # Maps from base indicator output names to enhanced indicator expected names
     internal_feature_mapping:
       macd_macd: "macd"
       macd_macdsignal: "macd_signal"
@@ -491,9 +546,10 @@ trading:
       stochastic_slowd: "stoch_d"
       aroon_aroonup: "aroon_up"
       aroon_aroondown: "aroon_down"
-      rsi: "rsi_14"
+      # Map base ATR output to what enhanced indicators expect
       atr: "atr_14"
-      williamsr: "willr"
+      # rsi already produces "rsi" which enhanced indicators can find directly
+      # williamsr already produces "williamsr" which enhanced indicators can find
 
   # ──────────────────────────────────────────────────────────────────────────
   # TRADING INSTRUMENTS
@@ -556,7 +612,7 @@ model_training:
   # Basic Training Configuration
   artifacts_path: "models/artifacts"
   historical_data_lookback_days: 60
-  min_data_for_training: 5000
+  min_data_for_training: 500
   confidence_threshold: 0.3
   drift_threshold_z_score: 3.0
   model_staleness_days: 7
@@ -640,6 +696,29 @@ model_training:
   retention:
     max_model_versions: 5
   
+  # ──────────────────────────────────────────────────────────────────────────
+  # MODEL REGISTRY CONFIGURATION
+  # Centralized model management system for production-grade model tracking
+  # ──────────────────────────────────────────────────────────────────────────
+  model_registry:
+    enabled: true
+    auto_register: true              # Automatically register models after training
+    auto_activate: false             # Manually control model activation for safety
+    activation_threshold:
+      min_accuracy: 0.45             # Increased from 0.35 - must beat random (33%) significantly
+      min_f1_score: 0.50            # Increased from 0.35 - ensure balanced performance
+      min_sharpe_ratio: 0.8         # Increased from 0.0 - reasonable for intraday trading
+      max_max_drawdown: 0.15        # Decreased from 0.5 - limit downside risk to 15%
+    trading_metrics_calculation:
+      enabled: true                  # Calculate trading-specific metrics
+      risk_free_rate: 0.05          # Annual risk-free rate for Sharpe calculation
+      trading_days_per_year: 252    # Number of trading days per year
+      signal_weight: 1.0            # Weight for signal strength calculation
+      transaction_cost: 0.001       # Transaction cost per trade (0.1%)
+    version_format: "{instrument_id}_{timeframe}_{timestamp}"
+    cleanup_enabled: true           # Enable automatic cleanup of old entries
+    max_registry_entries: 50       # Maximum number of registry entries to keep
+
   # Class Labels for Multi-class Classification
   class_label_mapping:
     -1: "sell"
