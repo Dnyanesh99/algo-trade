@@ -41,16 +41,16 @@ processing_control:
   min_candles_for_historical: 100    # Minimum 1min candles needed
   min_candles_for_aggregation: 100   # Minimum 1min candles for aggregation
   min_candles_for_features: 20       # Minimum aggregated candles per timeframe
-  min_candles_for_labeling: 200      # Minimum OHLCV candles for labeling
+  min_candles_for_labeling: 100      # Minimum OHLCV candles for labeling (reduced for options data)
   min_features_for_labeling: 100     # Minimum feature records for labeling
   min_existing_features_threshold: 10 # Minimum existing features to consider adequate
   min_existing_labels_threshold: 50   # Minimum existing labels to consider adequate
 
   # Time interval configurations for data availability checks
-  historical_data_availability_days: 7    # Days to look back for historical data availability
-  aggregation_data_availability_days: 7   # Days to look back for aggregation data availability
-  features_data_availability_days: 7      # Days to look back for feature data availability
-  labeling_data_availability_days: 5      # Days to look back for labeling data availability
+  historical_data_availability_days: 365    # Days to look back for historical data availability
+  aggregation_data_availability_days: 365   # Days to look back for aggregation data availability
+  features_data_availability_days: 365      # Days to look back for feature data availability
+  labeling_data_availability_days: 365      # Days to look back for labeling data availability
   existing_features_availability_days: 2  # Days to look back for existing features
   existing_labels_availability_days: 3    # Days to look back for existing labels
 
@@ -72,7 +72,7 @@ data_reset:
   # Set to true to include table, false to exclude, or remove line to use category setting
   tables:
     # OHLCV Data Tables (TimescaleDB Hypertables)
-    ohlcv_1min: true
+    ohlcv_1min: false
     ohlcv_5min: true  
     ohlcv_15min: true
     ohlcv_60min: true
@@ -128,7 +128,7 @@ broker:
   
   # Data Fetching Settings
   historical_interval: "minute"  # Default historical data interval
-  should_fetch_instruments: true   # Set to true to trigger instrument synchronization
+  should_fetch_instruments: false  # Set to true to trigger instrument synchronization
   # 🔧 MIGRATION: historical_data_lookback_days moved to model_training section (line 478)
   
   # Supported segement Types
@@ -153,25 +153,25 @@ broker:
 # Controlled by UPSTOX_DATA_ENABLED environment variable
 # ============================================================================
 upstox:
-  # Underlying Instruments (instrument keys from Upstox API)
-  underlying_instruments:
-    - "NIFTY 50"           # NIFTY options/futures
+  # Instruments Configuration with expiry settings
+  instruments:
+    - instrument_key: "NSE_INDEX|Nifty 50"
+      expiry_type: "weekly"
+      expiry_date: "2025-07-24"
+    # - instrument_key: "BSE_INDEX|SENSEX"
+    #   expiry_type: "monthly"
+    #   expiry_date: "2024-10-31"
 
   # Processing Configuration - CRITICAL: Controls data volume!
   processing:
-    # ⚠️ MOST IMPORTANT PARAMETER ⚠️
-    # Each expiry typically has ~100 option contracts (50 strikes × 2 types)
-    # Examples: 1=~100 contracts, 3=~300 contracts, 6=~600 contracts
-    max_expiries_per_instrument: 6   # Number of recent expiries to process
-    
-    # Contract Types to Process
+
     contract_types:                  # Types of contracts to fetch
       - "option"                     # CE/PE options
       # - "future"                   # Futures (uncomment if needed)
     
-    # Data Range Configuration
     interval: "1minute"              # Data interval for historical candles
-    months_back: 6                   # Historical data range in months
+    # Note: Data range is automatically calculated based on expiry_type 
+    # (weekly: 7 trading days, monthly: 30 trading days)
 
   # Rate Limiting Configuration (Respect Upstox API limits)
   rate_limits:
@@ -235,7 +235,7 @@ trading:
     
     # Barrier Configuration - REBALANCED FOR BETTER CLASS DISTRIBUTION
     max_holding_periods: 12       # Increased from 10 to allow more meaningful price movements
-    min_bars_required: 100
+    min_bars_required: 75     # Reduced for options data - need ATR period (10) + volatility lookback (20) + buffer (45)
     epsilon: 0.0025               # Increased from 0.0015 (0.25% vs 0.15%) for more NEUTRAL labels
     use_dynamic_barriers: true
     use_dynamic_epsilon: true     # Enable dynamic epsilon based on volatility regime
@@ -300,7 +300,7 @@ trading:
     
     # Data fetching limits for main.py operations
     ohlcv_data_limit_for_labeling: 5000      # Maximum OHLCV records to fetch for labeling
-    minimum_ohlcv_data_for_labeling: 200     # Minimum data required before attempting labeling
+    minimum_ohlcv_data_for_labeling: 100     # Minimum data required before attempting labeling (reduced for options data)
 
   # ──────────────────────────────────────────────────────────────────────────
   # TECHNICAL INDICATORS CONFIGURATION
@@ -555,12 +555,8 @@ trading:
   # TRADING INSTRUMENTS
   # Market indices for signal generation and analysis
   # ──────────────────────────────────────────────────────────────────────────
-  instruments:
-    - label: "NIFTY 50"
-      tradingsymbol: "NIFTY 50"
-      exchange: "NSE"
-      instrument_type: "EQ"
-      segment: "INDICES"
+  # Empty list - using Upstox instruments populated via orchestrator, no Zerodha sync needed
+  instruments: []
     
     # - label: "SENSEX"
     #   tradingsymbol: "SENSEX"
@@ -611,8 +607,8 @@ trading:
 model_training:
   # Basic Training Configuration
   artifacts_path: "models/artifacts"
-  historical_data_lookback_days: 60
-  min_data_for_training: 500
+  historical_data_lookback_days: 365
+  min_data_for_training: 200
   confidence_threshold: 0.3
   drift_threshold_z_score: 3.0
   model_staleness_days: 7
@@ -902,7 +898,7 @@ data_quality:
     enabled: true
     min_valid_rows: 50
     quality_score_threshold: 80.0
-    required_columns: ["ts", "open", "high", "low", "close"]
+    required_columns: ["ts", "open", "high", "low", "close", "volume", "oi"]
     expected_columns:
       date: "datetime64[ns]"
       open: "float64"
@@ -1101,56 +1097,11 @@ data_pipeline:
 
 # ============================================================================
 # MARKET CALENDAR & TRADING HOURS
-# Market timing, holidays, and special trading sessions
+# MARKET CALENDAR CONFIGURATION REMOVED
 # ============================================================================
-market_calendar:
-  holidays_cache_path: "cache/holidays.json"
-  holidays:
-    - "2024-01-22"  # Special Holiday (Monday)
-    - "2024-01-26"  # Republic Day (Friday)
-    - "2024-03-08"  # Mahashivratri (Friday)
-    - "2024-03-25"  # Holi (Monday)
-    - "2024-03-29"  # Good Friday (Friday)
-    - "2024-04-11"  # Id-Ul-Fitr (Ramadan Eid) (Thursday)
-    - "2024-04-17"  # Shri Ram Navmi (Wednesday)
-    - "2024-05-01"  # Maharashtra Day (Wednesday)
-    - "2024-05-20"  # General Parliamentary Elections (Monday)
-    - "2024-06-17"  # Bakri Id (Monday)
-    - "2024-07-17"  # Moharram (Wednesday)
-    - "2024-08-15"  # Independence Day/Parsi New Year (Thursday)
-    - "2024-10-02"  # Mahatma Gandhi Jayanti (Wednesday)
-    - "2024-11-01"  # Diwali Laxmi Pujan* (Friday)
-    - "2024-11-15"  # Gurunanak Jayanti (Friday)
-    - "2024-12-25"  # Christmas (Wednesday)
-    - "2025-02-26"  # Mahashivratri (Wednesday)
-    - "2025-03-14"  # Holi (Friday)
-    - "2025-03-31"  # Id-Ul-Fitr (Ramadan Eid) (Monday)
-    - "2025-04-10"  # Shri Mahavir Jayanti (Thursday)
-    - "2025-04-14"  # Dr. Baba Saheb Ambedkar Jayanti (Monday)
-    - "2025-04-18"  # Good Friday (Friday)
-    - "2025-05-01"  # Maharashtra Day (Thursday)
-    - "2025-08-15"  # Independence Day (Friday)
-    - "2025-08-27"  # Ganesh Chaturthi (Wednesday)
-    - "2025-10-02"  # Mahatma Gandhi Jayanti/Dussehra (Thursday)
-    - "2025-10-21"  # Diwali Laxmi Pujan* (Tuesday)
-    - "2025-10-22"  # Diwali-Balipratipada (Wednesday)
-    - "2025-11-05"  # Prakash Gurpurb Sri Guru Nanak Dev (Wednesday)
-    - "2025-12-25"  # Christmas (Thursday)
-  
-  # Regular Trading Hours
-  market_open_time: "09:15"
-  market_close_time: "15:30"
-  
-  # Special Trading Sessions
-  muhurat_trading_sessions:
-    - date: "2025-10-21"  # Diwali Laxmi Pujan
-      open: "18:00"       # Placeholder, timings to be notified
-      close: "19:15"      # Placeholder, timings to be notified
-  
-  half_day_sessions:
-    - date: "2025-02-01"  # Budget Day
-      open: "09:15"
-      close: "12:30"
+# Market holidays and trading hours are now stored in the database
+# Use upstox_orchestrator.py option 4 to fetch and populate holiday data
+# ============================================================================
 
 # ============================================================================
 # AUTHENTICATION & SECURITY

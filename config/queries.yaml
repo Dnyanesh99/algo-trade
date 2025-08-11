@@ -129,9 +129,10 @@ instrument_repo:
   insert_instrument: |
     INSERT INTO instruments (
         instrument_token, exchange_token, tradingsymbol, name, last_price,
-        expiry, strike, tick_size, lot_size, instrument_type, segment, exchange, last_updated
+        expiry, strike, tick_size, lot_size, instrument_type, segment, exchange,
+        freeze_quantity, underlying_key, underlying_type, underlying_symbol, minimum_lot, weekly, last_updated
     ) VALUES (
-        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW()
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, NOW()
     ) RETURNING instrument_id;
   update_instrument: |
     UPDATE instruments SET
