@@ -1,4 +1,5 @@
 # Makefile for Automated Intraday Trading Signal Generation System
+VENV_PATH = .venv
 .PHONY: help install install-dev test lint format type-check security clean docs run
 
 # Default target
@@ -12,7 +13,7 @@ install: ## Install dependencies
 	pip install -e .
 
 install-dev: ## Install development dependencies
-	pip install -e ".[dev,test,docs]"
+	$(VENV_PATH)/bin/pip install -e ".[dev,test,docs]"
 
 test: ## Run tests
 	pytest -v --cov=src --cov-report=term-missing --cov-report=html
@@ -24,18 +25,20 @@ test-integration: ## Run integration tests
 	pytest -v -m "integration" tests/
 
 lint: ## Run linting
-	ruff check src main.py
-	ruff format --check src main.py
+	$(VENV_PATH)/bin/ruff check src main.py
+	$(VENV_PATH)/bin/ruff format --check src main.py
+	
 
 format: ## Format code
-	ruff format src main.py
-	ruff check --fix src main.py
+	$(VENV_PATH)/bin/ruff format src main.py
+	$(VENV_PATH)/bin/ruff check --fix src main.py
 
 type-check: ## Run type checking
-	mypy src
+	$(VENV_PATH)/bin/mypy --strict src 
+	$(VENV_PATH)/bin/mypy --strict main.py
 
 security: ## Run security checks
-	bandit -r src
+	$(VENV_PATH)/bin/bandit -r src
 
 clean: ## Clean build artifacts
 	find . -type d -name "__pycache__" -exec rm -rf {} +
@@ -69,10 +72,10 @@ db-migrate: ## Run database migrations
 
 # Application operations
 run-historical: ## Run in historical mode
-	python main.py
+	$(VENV_PATH)/bin/python main.py
 
 run-live: ## Run in live mode (ensure config is set to LIVE_MODE)
-	python main.py
+	$(VENV_PATH)/bin/python main.py
 
 # Development utilities
 logs: ## View application logs

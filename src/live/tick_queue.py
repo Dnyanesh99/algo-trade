@@ -27,40 +27,42 @@ class TickQueue:
     def __init__(self) -> None:
         if self._is_initialized:
             return
-        if config.performance is None:
-            raise ValueError("Performance configuration is required")
-        self._queue = asyncio.Queue(maxsize=config.performance.processing.tick_queue_max_size)
+        if (
+            not config.performance
+            or not config.performance.processing
+            or not config.performance.processing.tick_queue_max_size
+        ):
+            raise ValueError("performance.processing.tick_queue_max_size configuration is required.")
+
+        max_size = config.performance.processing.tick_queue_max_size
+        if not isinstance(max_size, int) or max_size <= 0:
+            raise ValueError("tick_queue_max_size must be a positive integer.")
+
+        self._queue = asyncio.Queue(maxsize=max_size)
         TickQueue._is_initialized = True
-        logger.info("TickQueue initialized.")
+        logger.info(f"TickQueue initialized with a max size of {max_size}.")
 
     async def put(self, tick: dict[str, Any]) -> None:
         """
         Puts a single tick into the queue. If the queue is full, it will log a warning
-        and potentially drop the tick to prevent blocking the producer (WebSocket callback).
+        and drop the tick to prevent blocking the producer (WebSocket callback).
         """
         try:
             self._queue.put_nowait(tick)
-            logger.debug(f"Tick added to queue. Current size: {self._queue.qsize()}")
+            logger.debug(f"Tick for {tick.get('instrument_token')} added to queue. Current size: {self._queue.qsize()}")
+            metrics_registry.increment_counter("ticks_added_to_queue_total")
         except asyncio.QueueFull:
-            logger.warning("Tick queue is full. Dropping tick to prevent blocking WebSocket callback.")
+            logger.error(
+                "CRITICAL: Tick queue is full. Dropping tick to prevent WebSocket callback blockage. This indicates a performance bottleneck."
+            )
+            metrics_registry.increment_counter("tick_queue_overflow_total")
 
     async def put_many(self, ticks: list[dict[str, Any]]) -> None:
         """
         Puts multiple ticks into the queue. Tries to put all, but may drop some if queue is full.
         """
-        successfully_put = 0
         for tick in ticks:
-            try:
-                self._queue.put_nowait(tick)
-                successfully_put += 1
-            except asyncio.QueueFull:
-                logger.warning(
-                    "Tick queue is full while putting multiple ticks. Dropping remaining ticks in this batch."
-                )
-                break  # Stop putting more ticks from this batch if queue is full
-        logger.debug(
-            f"Attempted to put {len(ticks)} ticks, successfully put {successfully_put}. Current queue size: {self._queue.qsize()}"
-        )
+            await self.put(tick)
 
     async def get(self) -> dict[str, Any]:
         """

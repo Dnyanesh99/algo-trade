@@ -239,6 +239,18 @@ metrics:
         description: "Total number of error recovery attempts."
         labels: ["component", "error_type"]
         dashboard_panel: "error_recovery_panel"
+    data_aggregation:
+      - name: candle_aggregation_total
+        type: counter
+        description: "Total number of candle aggregation attempts."
+        labels: ["timeframe", "status"]
+        dashboard_panel: "candle_aggregation_total_panel"
+      - name: candle_aggregation_duration_seconds
+        type: histogram
+        description: "Duration of candle aggregation in seconds."
+        labels: ["timeframe"]
+        buckets: [0.001, 0.01, 0.1, 1.0, 5.0, 10.0]
+        dashboard_panel: "candle_aggregation_duration_panel"
   dashboard:
     title: "Algo Trading System Metrics"
     refresh_interval: "5s"

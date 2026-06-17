@@ -7,7 +7,7 @@
 
 ## 🎯 Overview
 
-A **production-grade, local trading signal system** designed to generate intraday trading signals for Indian indices (NIFTY 50, BANK NIFTY, etc.) on a 15-minute timeframe. Built by a Senior Quantitative Developer with 20+ years of experience, this system emphasizes **clean, modular, memory-efficient, strictly typed code** that adheres to the highest industry standards.
+A **production-grade, local trading signal system** designed to generate intraday trading signals for Indian indices (NIFTY 50, BANK NIFTY, etc.) on a 15-minute timeframe. This system emphasizes **clean, modular, memory-efficient, strictly typed code** that adheres to the highest industry standards.
 
 ### ⚠️ Important Notice
 
@@ -281,4 +281,4 @@ For support, please create an issue in the GitHub repository or contact the deve
 
 ---
 
-**Built with ❤️ by Senior Quantitative Developers for the Trading Community**# algo-trade
+**Built for the Trading Community**# algo-trade

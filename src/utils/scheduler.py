@@ -1,9 +1,11 @@
 """
 Production-grade market-aware scheduler for trading signal generation.
-Handles market hours, readiness checks, and precise timing for predictions.
+Handles market hours, readiness checks, precise timing for predictions,
+and intelligent historical processing with state management.
 """
 
 import asyncio
+import os
 from datetime import datetime, timedelta
 from typing import Any, Callable, Optional
 
@@ -23,48 +25,70 @@ class Scheduler:
     - Configurable readiness checks and intervals
     - Precise timing with candle boundary alignment
     - Thread-safe operation with proper error handling
+    - Intelligent historical processing with state management
+    - Idempotent operations to prevent data duplication
     """
 
     def __init__(
         self,
         market_calendar: MarketCalendar,
         system_state: SystemState,
-        prediction_pipeline_callback: Callable,
+        prediction_pipeline_callback: Callable[..., Any],
         scheduler_config: SchedulerConfig,
+        historical_processing_callback: Optional[Callable[..., Any]] = None,
     ):
         if not scheduler_config:
+            logger.error("ConfigurationError: Scheduler configuration is required for Scheduler initialization.")
             raise ValueError("Scheduler configuration is required")
 
         self.market_calendar = market_calendar
         self.system_state = system_state
         self.prediction_pipeline_callback = prediction_pipeline_callback
+        self.historical_processing_callback = historical_processing_callback
 
         # Configuration-driven parameters
         self.candle_interval_minutes = scheduler_config.prediction_interval_minutes
         self.readiness_check_time = datetime.strptime(scheduler_config.readiness_check_time, "%H:%M").time()
 
         # State management
-        self._scheduler_task: Optional[asyncio.Task] = None
+        self._scheduler_task: Optional[asyncio.Task[None]] = None
         self._last_triggered_candle = -1
         self._is_running = False
         self._lock = asyncio.Lock()
+
+        # Historical processing state
+        self._historical_processing_complete = False
+        self._force_reprocess = os.getenv("FORCE_REPROCESS", "false").lower() == "true"
+        self._reset_state = os.getenv("RESET_PROCESSING_STATE", "false").lower() == "true"
 
         # Validation
         if self.candle_interval_minutes <= 0:
             raise ValueError(f"Invalid candle interval: {self.candle_interval_minutes}")
 
+        if self._force_reprocess:
+            logger.warning("FORCE_REPROCESS=true - All data will be reprocessed")
+        if self._reset_state:
+            logger.warning("RESET_PROCESSING_STATE=true - Processing state will be reset")
+
         logger.info(
-            f"Scheduler initialized: {self.candle_interval_minutes}min intervals, "
-            f"readiness check at {self.readiness_check_time.strftime('%H:%M')}"
+            f"Enhanced Scheduler initialized: {self.candle_interval_minutes}min intervals, "
+            f"readiness check at {self.readiness_check_time.strftime('%H:%M')}, "
+            f"historical processing: {'enabled' if historical_processing_callback else 'disabled'}"
         )
 
     async def _run_scheduler(self) -> None:
         """
-        Main scheduler loop with improved market awareness and error handling.
+        Enhanced scheduler loop with historical processing phase management.
         """
-        logger.info("Scheduler started. Monitoring market hours...")
+        logger.info("Enhanced Scheduler started. Checking historical processing status...")
 
         try:
+            # First ensure historical processing is complete before live processing
+            if self.historical_processing_callback and not self._historical_processing_complete:
+                await self._ensure_historical_processing_complete()
+
+            logger.info("Entering live scheduling mode. Monitoring market hours...")
+
             while self._is_running:
                 now = datetime.now(self.market_calendar.tz)
                 time_to_sleep = 1.0  # Minimum sleep to prevent busy-waiting
@@ -131,7 +155,7 @@ class Scheduler:
                                     self._last_triggered_candle = current_candle
                                     logger.debug("Pipeline execution completed successfully")
                                 except Exception as e:
-                                    logger.error(f"Pipeline execution failed: {e}")
+                                    logger.error(f"Pipeline execution failed: {e}", exc_info=True)
                                     # Continue running despite pipeline failure
 
                 # Ensure sleep is not negative or excessively small
@@ -141,7 +165,7 @@ class Scheduler:
             logger.info("Scheduler cancelled")
             raise
         except Exception as e:
-            logger.error(f"Fatal error in scheduler: {e}")
+            logger.critical(f"Fatal error in scheduler: {e}", exc_info=True)
             raise
         finally:
             logger.info("Scheduler loop ended")
@@ -186,10 +210,45 @@ class Scheduler:
                 return is_available
 
             except Exception as e:
-                logger.error(f"Error checking 60-min data availability: {e}")
+                logger.error(f"Error checking 60-min data availability: {e}", exc_info=True)
                 return False
 
         return self.system_state.is_60_min_data_available()
+
+    async def _ensure_historical_processing_complete(self) -> None:
+        """
+        Ensure all historical processing is complete before live processing.
+        Leverages existing state management for intelligent processing control.
+        """
+        logger.info("Starting historical processing phase...")
+
+        try:
+            if self._reset_state:
+                # Reset all processing state if requested
+                self.system_state.reset_processing_state()
+                logger.warning("Processing state reset as requested")
+
+            # Trigger historical processing via callback
+            if self.historical_processing_callback:
+                logger.info("Executing historical processing pipeline...")
+                success = await self.historical_processing_callback()
+
+                if success:
+                    self._historical_processing_complete = True
+                    self.system_state.set_system_status("READY_FOR_LIVE")
+                    logger.info("Historical processing phase complete. System ready for live processing.")
+                else:
+                    logger.critical("Historical processing failed. Cannot proceed to live mode.")
+                    raise RuntimeError("Historical processing failed")
+            else:
+                # No historical processing callback - assume ready
+                self._historical_processing_complete = True
+                logger.info("No historical processing callback. Proceeding to live mode.")
+
+        except Exception as e:
+            logger.error(f"Error in historical processing phase: {e}")
+            self.system_state.set_system_status("ERROR_HISTORICAL_PROCESSING")
+            raise
 
     def _should_trigger_prediction(self, now: datetime) -> bool:
         """
@@ -266,4 +325,25 @@ class Scheduler:
             "candle_interval_minutes": self.candle_interval_minutes,
             "readiness_check_time": self.readiness_check_time.strftime("%H:%M"),
             "task_done": self._scheduler_task.done() if self._scheduler_task else True,
+            "historical_processing_complete": self._historical_processing_complete,
+            "system_status": self.system_state.get_system_status(),
+            "force_reprocess": self._force_reprocess,
+            "reset_state": self._reset_state,
         }
+
+    def is_historical_processing_complete(self) -> bool:
+        """Check if historical processing is complete."""
+        return self._historical_processing_complete
+
+    def force_historical_reprocessing(self) -> None:
+        """Force historical reprocessing on next scheduler run."""
+        self._historical_processing_complete = False
+        self._force_reprocess = True
+        logger.warning("Historical reprocessing forced. Will reprocess on next run.")
+
+    def reset_historical_state(self) -> None:
+        """Reset historical processing state."""
+        self._historical_processing_complete = False
+        self._reset_state = True
+        self.system_state.reset_processing_state()
+        logger.warning("Historical processing state reset.")

@@ -27,8 +27,12 @@ class TimeSynchronizer:
 
     def __init__(self, time_synchronizer_config: TimeSynchronizerConfig, system_config: SystemConfig) -> None:
         if not time_synchronizer_config:
+            logger.error(
+                "ConfigurationError: Time synchronizer configuration is required for TimeSynchronizer initialization."
+            )
             raise ValueError("Time synchronizer configuration is required")
         if not system_config:
+            logger.error("ConfigurationError: System configuration is required for TimeSynchronizer initialization.")
             raise ValueError("System configuration is required")
 
         self.candle_interval_minutes = time_synchronizer_config.candle_interval_minutes
@@ -117,7 +121,7 @@ class TimeSynchronizer:
                 )
                 if attempt == self.max_sync_attempts - 1:
                     logger.error(
-                        f"Failed to synchronize after {self.max_sync_attempts} attempts. Final error: {sync_error:.3f}s"
+                        f"SynchronizationFailed: Failed to synchronize after {self.max_sync_attempts} attempts. Final error: {sync_error:.3f}s (tolerance: {self.sync_tolerance_seconds:.3f}s)"
                     )
                     raise RuntimeError(
                         f"Time synchronization failed after {self.max_sync_attempts} attempts. "
@@ -128,7 +132,9 @@ class TimeSynchronizer:
                 await asyncio.sleep(0.1)
 
             except Exception as e:
-                logger.error(f"Error in synchronization attempt {attempt + 1}: {e}")
+                logger.error(
+                    f"SynchronizationError: Error in synchronization attempt {attempt + 1}: {e}", exc_info=True
+                )
                 if attempt == self.max_sync_attempts - 1:
                     raise RuntimeError(f"Time synchronization failed after {self.max_sync_attempts} attempts") from e
                 await asyncio.sleep(0.1)
