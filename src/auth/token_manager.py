@@ -15,6 +15,9 @@ class TokenManager:
     Manages the in-memory storage and retrieval of the Zerodha KiteConnect access token.
     Implemented as a singleton to ensure a single source of truth for the token.
     Additionally, handles persistence of the token to a file.
+
+    Note: Zerodha Kite Connect deliberately does not provide refresh tokens.
+    Access tokens are valid only for the trading day and expire around 07:00-07:30 AM IST.
     """
 
     _instance: Optional["TokenManager"] = None
@@ -36,91 +39,86 @@ class TokenManager:
                 cls._instance._is_token_valid = False
                 cls._instance._auth_failure_count = 0
 
-                # Get token file path from environment variable with default
-                token_file_path = os.getenv("ACCESS_TOKEN_FILE_PATH", "config/access_token.json")
-                cls._instance._token_file_path = Path(token_file_path)
+                token_file_path_str = os.getenv("ACCESS_TOKEN_FILE_PATH")
+                if not token_file_path_str:
+                    logger.error("ACCESS_TOKEN_FILE_PATH environment variable not set.")
+                    raise ValueError("ACCESS_TOKEN_FILE_PATH is not set in the environment.")
+
+                cls._instance._token_file_path = Path(token_file_path_str)
                 cls._instance._load_token_from_file()
-                logger.info("TokenManager initialized.")
+                logger.info(f"TokenManager initialized. Token file path: '{cls._instance._token_file_path}'")
         return cls._instance
 
     def __init__(self) -> None:
         pass
 
-    def _save_token_to_file(self, token: str) -> None:
-        """
-        Saves the access token to a file with secure permissions.
-        """
+    def _save_token_to_file(self, access_token: str) -> None:
+        """Saves access token to a file."""
+        if not access_token:
+            logger.error("Attempted to save empty access token. Aborting file save.")
+            return
         try:
             self._token_file_path.parent.mkdir(parents=True, exist_ok=True)
             with open(self._token_file_path, "w") as f:
-                json.dump({"access_token": token}, f)
-            # Set file permissions to 600 (read/write for owner only)
+                json.dump({"access_token": access_token}, f)
             os.chmod(self._token_file_path, 0o600)
-            logger.info(f"Access token saved to {self._token_file_path} with secure permissions.")
+            logger.info(f"Token securely saved to {self._token_file_path}")
         except OSError as e:
-            logger.error(f"Failed to save access token to file {self._token_file_path}: {e}")
+            logger.critical(f"CRITICAL: Failed to save token to file '{self._token_file_path}': {e}", exc_info=True)
+            raise RuntimeError(f"Could not persist token to {self._token_file_path}") from e
 
     def _load_token_from_file(self) -> None:
-        """
-        Loads the access token from a file.
-        """
+        """Loads access token from a file."""
         if self._token_file_path.exists():
             try:
+                logger.debug(f"Attempting to load token from '{self._token_file_path}'")
                 with open(self._token_file_path) as f:
                     data = json.load(f)
-                    token = data.get("access_token")
-                    if token and token.strip():
-                        self._access_token = token.strip()
-                        logger.info(f"Access token loaded from {self._token_file_path}")
+                    self._access_token = data.get("access_token")
+                    if self._access_token:
+                        logger.info(f"Access token successfully loaded from {self._token_file_path}")
                     else:
-                        self._access_token = None
-                        logger.warning(f"Access token file {self._token_file_path} is empty or malformed.")
+                        logger.warning(f"Token file '{self._token_file_path}' is missing 'access_token'.")
             except (OSError, json.JSONDecodeError) as e:
-                logger.error(f"Failed to load access token from file {self._token_file_path}: {e}")
+                logger.error(f"Failed to read or parse token file '{self._token_file_path}': {e}", exc_info=True)
+                # Corrupt or unreadable file, treat as if no token is available
+                self._access_token = None
         else:
-            logger.info(f"Access token file {self._token_file_path} does not exist. No token loaded.")
+            logger.info(f"Token file '{self._token_file_path}' does not exist. No token loaded.")
 
-    def set_access_token(self, token: str) -> None:
-        """
-        Sets the access token and persists it to a file.
-        """
-        if not isinstance(token, str) or not token:
-            raise ValueError("Access token must be a non-empty string.")
-        with self._lock:
-            self._access_token = token
-            self._save_token_to_file(token)
-            # Reset validation state when new token is set
-            self._last_validation_time = 0
-            self._is_token_valid = False
-            self._auth_failure_count = 0
-        logger.info("Access token set successfully.")
+    def set_token(self, access_token: str) -> None:
+        """Sets the access token, ensuring it is not empty."""
+        if not access_token:
+            logger.error("Attempted to set empty access token.")
+            raise ValueError("Access token cannot be empty.")
+
+        try:
+            with self._lock:
+                self._access_token = access_token
+                logger.info("In-memory token updated. Persisting to file.")
+                self._save_token_to_file(access_token)
+                logger.info("Token file save completed. Updating cache.")
+                self._last_validation_time = 0  # Invalidate cache
+                self._is_token_valid = False
+                self.reset_auth_failures()  # Reset failure count on new token
+                logger.info("Token metadata updated.")
+            logger.info("Access token set successfully.")
+        except Exception as e:
+            logger.critical(f"Failed to set access token: {e}", exc_info=True)
+            raise
 
     def get_access_token(self) -> Optional[str]:
-        """
-        Retrieves the stored access token.
-        """
+        """Retrieves the stored access token."""
         with self._lock:
-            token = self._access_token
-        if token is None:
-            logger.warning("Attempted to retrieve access token, but no token is set.")
-        return token
+            return self._access_token
 
-    def clear_access_token(self) -> None:
-        """
-        Clears the stored access token (e.g., on logout or token expiry).
-        Also deletes the token file.
-        """
+    def clear_tokens(self) -> None:
+        """Clears token from memory but preserves the file for persistence across restarts."""
         with self._lock:
             self._access_token = None
             self._last_validation_time = 0
             self._is_token_valid = False
-            if self._token_file_path.exists():
-                try:
-                    self._token_file_path.unlink()
-                    logger.info(f"Access token file {self._token_file_path} deleted.")
-                except OSError as e:
-                    logger.error(f"Failed to delete access token file {self._token_file_path}: {e}")
-        logger.info("Access token cleared.")
+        logger.info("Token cleared from memory but file is preserved for persistence.")
 
     def is_token_available(self) -> bool:
         """

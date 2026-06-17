@@ -84,10 +84,16 @@ async def get_rate_limiter(endpoint_name: str, config: Optional[AppConfig] = Non
                 config = config_loader.get_config()
 
             if not config.api_rate_limits:
+                logger.error(
+                    "ConfigurationError: api_rate_limits configuration is missing. Cannot initialize rate limiter."
+                )
                 raise ValueError("api_rate_limits configuration is missing.")
 
             rate_limit_config = getattr(config.api_rate_limits, endpoint_name, None)
             if not rate_limit_config:
+                logger.error(
+                    f"ConfigurationError: No rate limit configuration found for endpoint: {endpoint_name}. Cannot initialize rate limiter."
+                )
                 raise ValueError(f"No rate limit configuration found for endpoint: {endpoint_name}")
 
             _rate_limiters[endpoint_name] = RateLimiter(endpoint_name, rate_limit_config)

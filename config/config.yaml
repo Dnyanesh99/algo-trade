@@ -24,6 +24,92 @@ system:
   numexpr_threads: 1
 
 # ============================================================================
+# PROCESSING CONTROL CONFIGURATION
+# Intelligent processing state management and data duplication prevention
+# ============================================================================
+processing_control:
+  # Note: Frequently changing controls moved to environment variables:
+  # PROCESSING_CONTROL_ENABLED, HISTORICAL_PROCESSING_ENABLED, AGGREGATION_PROCESSING_ENABLED, 
+  # FEATURE_PROCESSING_ENABLED, LABELING_PROCESSING_ENABLED, HISTORICAL_MAX_GAP_HOURS,
+  # HISTORICAL_PARALLEL_INSTRUMENTS, AGGREGATION_REPROCESS_ON_SOURCE_CHANGE,
+  # FEATURE_INCREMENTAL_CALCULATION, FEATURE_RECOMPUTE_ON_CONFIG_CHANGE
+
+  # Batch processing settings
+  # labeling_batch_size: 1000
+  
+  # Data sufficiency thresholds for smart processing
+  min_candles_for_historical: 100    # Minimum 1min candles needed
+  min_candles_for_aggregation: 100   # Minimum 1min candles for aggregation
+  min_candles_for_features: 20       # Minimum aggregated candles per timeframe
+  min_candles_for_labeling: 100      # Minimum OHLCV candles for labeling (reduced for options data)
+  min_features_for_labeling: 100     # Minimum feature records for labeling
+  min_existing_features_threshold: 10 # Minimum existing features to consider adequate
+  min_existing_labels_threshold: 50   # Minimum existing labels to consider adequate
+
+  # Time interval configurations for data availability checks
+  historical_data_availability_days: 365    # Days to look back for historical data availability
+  aggregation_data_availability_days: 365   # Days to look back for aggregation data availability
+  features_data_availability_days: 365      # Days to look back for feature data availability
+  labeling_data_availability_days: 365      # Days to look back for labeling data availability
+  existing_features_availability_days: 2  # Days to look back for existing features
+  existing_labels_availability_days: 3    # Days to look back for existing labels
+
+# ============================================================================
+# DATA RESET CONFIGURATION
+# Configure which database tables to truncate when TRUNCATE_ALL_DATA=true
+# WARNING: This will permanently delete all data from selected tables!
+# ============================================================================
+data_reset:
+  # Enable/disable categories of tables for truncation
+  truncate_ohlcv_tables: true       # All OHLCV hypertables (1min, 5min, 15min, 60min)
+  truncate_feature_tables: true     # Features and engineered features
+  truncate_ml_tables: true          # Labels, signals, model registry
+  truncate_state_tables: true       # Processing state and data ranges
+  truncate_aggregation_tables: true # Daily/hourly aggregation tables
+  truncate_statistics_tables: true  # Performance metrics and statistics
+  
+  # Specific tables to include/exclude (overrides category settings)
+  # Set to true to include table, false to exclude, or remove line to use category setting
+  tables:
+    # OHLCV Data Tables (TimescaleDB Hypertables)
+    ohlcv_1min: false
+    ohlcv_5min: true  
+    ohlcv_15min: true
+    ohlcv_60min: true
+    
+    # Feature Engineering Tables
+    features: true
+    engineered_features: true
+    feature_scores: true
+    feature_selection_history: true 
+    feature_lineage: true
+    cross_asset_features: true
+    
+    # Views (cannot be truncated) - set to false
+    feature_performance_metrics: false  # VIEW
+    current_selected_features: false    # VIEW
+    
+    # Machine Learning Tables  
+    labels: true
+    signals: true
+    model_registry: true
+    labeling_statistics: true
+    
+    # State Management Tables
+    processing_state: true
+    data_ranges: true
+    system_operations_state: false
+    
+    # Aggregation and Analytics Tables
+    daily_ohlcv_agg: true
+    hourly_feature_agg: true
+    daily_signal_performance: true
+    
+    # System Tables (usually keep these)
+    instruments: false              # Keep instrument definitions
+    schema_migrations: false        # Keep migration history
+
+# ============================================================================
 # DATABASE CONFIGURATION
 # Database settings are loaded from environment variables (DB_HOST, DB_PORT, etc.)
 # ============================================================================
@@ -42,10 +128,11 @@ broker:
   
   # Data Fetching Settings
   historical_interval: "minute"  # Default historical data interval
-  should_fetch_instruments: true  # Set to true to trigger instrument synchronization
+  should_fetch_instruments: false  # Set to true to trigger instrument synchronization
+  # 🔧 MIGRATION: historical_data_lookback_days moved to model_training section (line 478)
   
-  # Supported Exchange Types
-  exchange_types:
+  # Supported segement Types
+  segment_types:
     - "INDICES"    # Market Indices (NIFTY, BANKNIFTY, etc.)
     - "EQ"         # Equity - Cash Market (NSE/BSE stocks)
     - "NFO-OPT"    # NSE Options
@@ -59,6 +146,59 @@ broker:
     initial_reconnect_delay: 5      # seconds
     heartbeat_timeout: 30           # seconds
     monitor_interval: 10            # seconds
+
+# ============================================================================
+# UPSTOX INTEGRATION
+# Upstox API v2 configuration for expired contracts data fetching
+# Controlled by UPSTOX_DATA_ENABLED environment variable
+# ============================================================================
+upstox:
+  # Instruments Configuration with expiry settings
+  instruments:
+    - instrument_key: "NSE_INDEX|Nifty 50"
+      expiry_type: "weekly"
+      expiry_date: "2025-07-24"
+    # - instrument_key: "BSE_INDEX|SENSEX"
+    #   expiry_type: "monthly"
+    #   expiry_date: "2024-10-31"
+
+  # Processing Configuration - CRITICAL: Controls data volume!
+  processing:
+
+    contract_types:                  # Types of contracts to fetch
+      - "option"                     # CE/PE options
+      # - "future"                   # Futures (uncomment if needed)
+    
+    interval: "1minute"              # Data interval for historical candles
+    # Note: Data range is automatically calculated based on expiry_type 
+    # (weekly: 7 trading days, monthly: 30 trading days)
+
+  # Rate Limiting Configuration (Respect Upstox API limits)
+  rate_limits:
+    # General API endpoints rate limiting
+    general_api:
+      requests_per_second: 10        # API requests per second
+      
+    # Historical data endpoints rate limiting  
+    historical_data:
+      requests_per_second: 5         # Historical data requests per second
+      
+    # Sleep intervals between requests (in seconds)
+    contract_fetch_delay: 0.5        # Delay between contract fetching
+    historical_data_delay: 2.0       # Delay between historical data requests
+    batch_processing_delay: 0.3      # Delay between batch processing
+
+  # Data Quality Control
+  data_quality:
+    min_contracts_per_group: 2       # Minimum contracts required for stitching
+    max_groups_per_instrument: 50    # Limit groups to prevent excessive processing
+    validate_ohlc: true              # Validate OHLC data relationships
+
+  # Database Configuration
+  database:
+    table_name: "ohlcv_1min"         # TimescaleDB table name for storage
+    append_mode: true                # Append to existing data (don't overwrite)
+    batch_size: 1000                 # Records per batch insert operation
 
 # ============================================================================
 # LOGGING CONFIGURATION
@@ -79,7 +219,8 @@ logging:
 trading:
   # Data Aggregation Settings
   aggregation_timeframes: [5, 15, 60]  # minutes
-  feature_timeframes: [5, 15, 60]      # minutes
+  feature_timeframes: [5, 15, 60]      # minutes - Calculate features for multiple timeframes
+  labeling_timeframes: [15]            # minutes - Generate labels only for signal target timeframes
   
   # ──────────────────────────────────────────────────────────────────────────
   # LABELING CONFIGURATION
@@ -87,26 +228,79 @@ trading:
   # ──────────────────────────────────────────────────────────────────────────
   labeling:
     # ATR (Average True Range) Settings
-    atr_period: 14
-    tp_atr_multiplier: 2.0        # Take profit barrier multiplier
-    sl_atr_multiplier: 1.5        # Stop loss barrier multiplier
+    atr_period: 10                # Reduced from 14 for more responsive intraday signals
+    tp_atr_multiplier: 2.5        # Increased from 2.0 for better risk-reward (2.5:1.5 = 1.67:1)
+    sl_atr_multiplier: 1.5        # Keep existing stop loss
     atr_smoothing: "ema"           # Options: "ema", "sma"
     
-    # Barrier Configuration
-    max_holding_periods: 10
-    close_open_threshold: 0.1
-    min_bars_required: 100
-    epsilon: 1.0e-9
+    # Barrier Configuration - REBALANCED FOR BETTER CLASS DISTRIBUTION
+    max_holding_periods: 12       # Increased from 10 to allow more meaningful price movements
+    min_bars_required: 75     # Reduced for options data - need ATR period (10) + volatility lookback (20) + buffer (45)
+    epsilon: 0.0025               # Increased from 0.0015 (0.25% vs 0.15%) for more NEUTRAL labels
     use_dynamic_barriers: true
+    use_dynamic_epsilon: true     # Enable dynamic epsilon based on volatility regime
     volatility_lookback: 20
-    atr_cache_size: 100
+
+    # Path-dependent timeout logic (De Prado, AFML) - WIDENED THRESHOLDS
+    path_dependent_timeout:
+      enabled: true
+      upper_threshold: 0.7        # Increased from 0.5 to reduce BUY labels from timeouts
+      lower_threshold: -0.7       # Decreased from -0.5 to reduce SELL labels from timeouts
+    
+    # Dynamic Epsilon Configuration - REBALANCED
+    dynamic_epsilon:
+      # Volatility regime multipliers (applied to base epsilon)
+      low_volatility_multiplier: 1.2      # Reduced from 1.5 - less epsilon expansion in low vol
+      normal_volatility_multiplier: 1.0    # Keep same  
+      high_volatility_multiplier: 0.8      # Increased from 0.7 - less epsilon shrinking in high vol
+      extreme_volatility_multiplier: 2.0   # Keep same
+      
+      # Volatility regime thresholds (ratios to rolling ATR mean)
+      low_volatility_threshold: 0.5
+      high_volatility_threshold: 1.5  
+      extreme_volatility_threshold: 2.5
+      
+      # Time-based multipliers for Indian market sessions
+      market_open_multiplier: 0.8
+      pre_lunch_multiplier: 1.3
+      market_close_multiplier: 0.9
+
+      # Market session times (start and end times in HH:MM format)
+      market_session_times:
+        opening: { start: "09:15", end: "10:00" }
+        pre_lunch: { start: "11:30", end: "13:00" }
+        closing: { start: "15:00", end: "15:30" }
+      
+      # Day-of-week multipliers
+      monday_multiplier: 1.1               # Weekend gap effects
+      friday_multiplier: 0.85              # Weekly expiry effects
+      
+      # Z-score based adjustments
+      extreme_zscore_threshold: 2.5        # |z| > 2.5
+      moderate_zscore_threshold: 1.5       # |z| > 1.5  
+      stable_zscore_threshold: 0.5         # |z| < 0.5
+      extreme_zscore_multiplier: 1.5
+      moderate_zscore_multiplier: 1.2
+      stable_zscore_multiplier: 0.9
+      
+      # Safety bounds
+      min_epsilon_multiplier: 0.3          # Prevent too small epsilon
+      max_epsilon_multiplier: 3.0          # Prevent too large epsilon
+      
+      # Options expiry detection (for index volatility effects)
+      weekly_expiry_day: 3                 # Thursday (0=Monday, 3=Thursday)
+      monthly_expiry_week: -1              # Last week of month  
+      expiry_volatility_multiplier: 0.75   # Reduce epsilon on expiry days
+
+    # NOTE: atr_cache_size is deprecated due to multi-process architecture
+    # atr_cache_size: 100
     dynamic_barrier_tp_sensitivity: 0.2
     dynamic_barrier_sl_sensitivity: 0.1
     sample_weight_decay_factor: 0.5
     
-    # Data Fetching Limits for Labeling Process
-    ohlcv_data_limit_for_labeling: 1000
-    minimum_ohlcv_data_for_labeling: 100
+    # Data fetching limits for main.py operations
+    ohlcv_data_limit_for_labeling: 5000      # Maximum OHLCV records to fetch for labeling
+    minimum_ohlcv_data_for_labeling: 100     # Minimum data required before attempting labeling (reduced for options data)
 
   # ──────────────────────────────────────────────────────────────────────────
   # TECHNICAL INDICATORS CONFIGURATION
@@ -115,6 +309,17 @@ trading:
   features:
     lookback_period: 200  # Minimum number of candles to fetch
     
+    # Indicator Control System
+    indicator_control:
+      enabled: true
+      disabled_indicators: []  # List of indicator names to disable
+      categories:
+        trend: true
+        momentum: true
+        volatility: true
+        volume: true
+        enhanced: true
+    
     # Technical Indicator Configurations
     # Each indicator can have default parameters and timeframe-specific overrides
     configurations:
@@ -122,20 +327,29 @@ trading:
       - name: macd
         function: MACD
         params:
-          default: { fastperiod: 12, slowperiod: 26, signalperiod: 9 }
-          60m: { fastperiod: 20, slowperiod: 40, signalperiod: 9 }
+          default: 
+            fastperiod: 12
+            slowperiod: 26
+            signalperiod: 9
+            source: "close"  # Source column for MACD calculation
+            oscillator_ma_type: "EMA"  # Options: "SMA", "EMA"
+            signal_ma_type: "EMA"      # Options: "SMA", "EMA"
+          60m: 
+            fastperiod: 20
+            slowperiod: 40
+            signalperiod: 9
       
       - name: adx
         function: ADX
         params:
-          default: { timeperiod: 14 }
-          60m: { timeperiod: 20 }
+          default: { dilen: 14, adxlen: 14 }
+          60m: { dilen: 20, adxlen: 20 }
       
       - name: sar
         function: SAR
         params:
-          default: { acceleration: 0.02, maximum: 0.2 }
-          60m: { acceleration: 0.025, maximum: 0.25 }
+          default: { start: 0.02, increment: 0.02, maximum: 0.2 }
+          60m: { start: 0.025, increment: 0.025, maximum: 0.25 }
       
       - name: aroon
         function: AROON
@@ -146,29 +360,70 @@ trading:
       - name: ht_trendline
         function: HT_TRENDLINE
         params:
-          default: {}
+          default: { source: "close" }
       
       # ┌─ MOMENTUM INDICATORS ─────────────────────────────────────────────────┐
       - name: rsi
         function: RSI
         params:
-          default: { timeperiod: 14 }
-          60m: { timeperiod: 21 }
+          default: 
+            timeperiod: 14
+            source: "close"  # Source column for RSI calculation
+            calculate_divergence: false  # Enable divergence detection
+            # Smoothing MA Configuration
+            smoothing:
+              type: "None"  # Options: "None", "SMA", "SMA + Bollinger Bands", "EMA", "SMMA (RMA)", "WMA", "VWMA"
+              length: 14
+              bb_std_dev: 2.0  # Only for Bollinger Bands type
+            # Divergence Detection Settings  
+            divergence:
+              lookback_left: 5
+              lookback_right: 5
+              range_upper: 60
+              range_lower: 5
+          60m: 
+            timeperiod: 21
+            smoothing:
+              type: "SMA"
+              length: 21
       
-      - name: stoch
+      - name: stochastic
         function: STOCH
         params:
-          default: { fastk_period: 14, slowk_period: 3, slowd_period: 3 }
+          default: 
+            # TradingView Simple Stochastic Parameters
+            length: 14        # K period (TradingView: "Length")
+            d_length: 3       # D line smoothing (TradingView: "D Line Length")
+            upper_trigger: 80 # Overbought level
+            lower_trigger: 20 # Oversold level
+            # Legacy TA-Lib support (auto-mapped from above)
+            fastk_period: 14
+            slowk_period: 1   # Fast %K (no smoothing)
+            slowd_period: 3   # %D smoothing
+            slowk_matype: 0   # SMA
+            slowd_matype: 0   # SMA
+          5m: { length: 10, d_length: 2 }
+          60m: { length: 21, d_length: 5 }
       
-      - name: willr
+      - name: williamsr
         function: WILLR
         params:
-          default: { timeperiod: 14 }
+          default: 
+            timeperiod: 21  # TradingView default (was 14)
+            ema_smoothing: false  # Enable EMA smoothing
+            ema_length: 13  # EMA smoothing period
+            upper_band: -20  # Overbought level
+            lower_band: -80  # Oversold level
       
       - name: cmo
         function: CMO
         params:
-          default: { timeperiod: 14 }
+          default: 
+            timeperiod: 9  # Number of periods/candles (TradingView default length)
+            source: "close"  # Configurable source column
+          5m: { timeperiod: 9 }
+          15m: { timeperiod: 9 }
+          60m: { timeperiod: 14 }
       
       - name: bop
         function: BOP
@@ -179,25 +434,27 @@ trading:
       - name: atr
         function: ATR
         params:
-          default: { timeperiod: 14 }
+          default: { length: 14, smoothing: "RMA" } # Options: RMA, SMA, EMA, WMA
       
-      - name: bbands
+      - name: bollingerbands
         function: BBANDS
         params:
-          default: { timeperiod: 20, nbdevup: 2.0, nbdevdn: 2.0 }
-          60m: { nbdevup: 2.5, nbdevdn: 2.5 }
+          default: { length: 34, mult: 2.0, source: "close" }
+          60m: { mult: 2.5 }
       
       - name: stddev
         function: STDDEV
         params:
-          default: { timeperiod: 5, nbdev: 1.0 }
-          60m: { timeperiod: 20 }
+          default: { length: 20, source: "close" }
       
       # ┌─ VOLUME INDICATORS ───────────────────────────────────────────────────┐
       - name: obv
         function: OBV
         params:
-          default: {}
+          default:
+            source: "close"
+            signal_smoothing_type: "SMA"
+            signal_smoothing_length: 21
       
       - name: adosc
         function: ADOSC
@@ -208,12 +465,12 @@ trading:
       - name: ht_dcperiod
         function: HT_DCPERIOD
         params:
-          default: {}
+          default: { source: "close" }
       
       - name: ht_phasor
         function: HT_PHASOR
         params:
-          default: {}
+          default: { source: "close" }
       
       # ┌─ OTHER INDICATORS ────────────────────────────────────────────────────┐
       - name: ultosc
@@ -231,69 +488,117 @@ trading:
         params:
           default: { timeperiod: 14 }
           60m: { timeperiod: 20 }
+      
+      # ┌─ ENHANCED INDICATORS ─────────────────────────────────────────────────┐
+      - name: momentumratios
+        function: MOMENTUM_RATIOS
+        params:
+          default: { lookback_periods: [5, 10, 20], min_data_length: 20, normalization_constant: 50, epsilon: 1e-9, max_momentum_ratio: 1.0 }
+          60m: { lookback_periods: [5, 10, 20, 50], min_data_length: 50 }
+      
+      - name: volatilityadjustments
+        function: VOLATILITY_ADJUSTMENTS
+        params:
+          default: { min_data_length: 2, epsilon: 1e-9 }
+          60m: { min_data_length: 3 }
+      
+      - name: trendconfirmations
+        function: TREND_CONFIRMATIONS
+        params:
+          default: { adx_normalization_factor: 25.0, trend_strength_max: 2.0 }
+          60m: { adx_normalization_factor: 30.0 }
+      
+      - name: meanreversionsignals
+        function: MEAN_REVERSION_SIGNALS
+        params:
+          default: { rsi_overbought: 70, rsi_oversold: 30, willr_overbought: -20, willr_oversold: -80, stoch_overbought: 80, stoch_oversold: 20 }
+          60m: { rsi_overbought: 75, rsi_oversold: 25 }
+      
+      - name: breakoutindicators
+        function: BREAKOUT_INDICATORS
+        params:
+          default: { min_data_length: 20, volume_lookback_short: 5, volume_lookback_long: 20, volume_ratio_max: 2.0, epsilon: 1e-9, max_breakout_strength: 0.5, volume_significance_threshold: 0.1 }
+          60m: { volume_lookback_short: 10, volume_lookback_long: 40 }
     
     # Feature Name Mapping for Output Standardization
     name_mapping:
-      macdsignal: "macd_signal"
-      macdhist: "macd_hist"
-      upperband: "bb_upper"
-      middleband: "bb_middle"
-      lowerband: "bb_lower"
-      aroonup: "aroon_up"
-      aroondown: "aroon_down"
+      macd_macdsignal: "macd_signal"
+      macd_macdhist: "macd_hist"
+      bbands_upperband: "bb_upper"
+      bbands_middleband: "bb_middle"
+      bbands_lowerband: "bb_lower"
+      aroon_aroonup: "aroon_up"
+      aroon_aroondown: "aroon_down"
+      stochastic_slowk: "stoch_k"
+      stochastic_slowd: "stoch_d"
+      obv_obv_signal: "obv_signal"
+
+    # Internal Feature Mapping for Enhanced Indicators
+    # Maps from base indicator output names to enhanced indicator expected names
+    internal_feature_mapping:
+      macd_macd: "macd"
+      macd_macdsignal: "macd_signal"
+      macd_macdhist: "macd_hist"
+      bbands_upperband: "bb_upper"
+      bbands_middleband: "bb_middle"
+      bbands_lowerband: "bb_lower"
+      stochastic_slowk: "stoch_k"
+      stochastic_slowd: "stoch_d"
+      aroon_aroonup: "aroon_up"
+      aroon_aroondown: "aroon_down"
+      # Map base ATR output to what enhanced indicators expect
+      atr: "atr_14"
+      # rsi already produces "rsi" which enhanced indicators can find directly
+      # williamsr already produces "williamsr" which enhanced indicators can find
 
   # ──────────────────────────────────────────────────────────────────────────
   # TRADING INSTRUMENTS
   # Market indices for signal generation and analysis
   # ──────────────────────────────────────────────────────────────────────────
-  instruments:
-    - label: "NIFTY 50"
-      tradingsymbol: "NIFTY 50"
-      exchange: "NSE"
-      instrument_type: "EQ"
-      segment: "INDICES"
+  # Empty list - using Upstox instruments populated via orchestrator, no Zerodha sync needed
+  instruments: []
     
-    - label: "SENSEX"
-      tradingsymbol: "SENSEX"
-      exchange: "BSE"
-      instrument_type: "EQ"
-      segment: "INDICES"
+    # - label: "SENSEX"
+    #   tradingsymbol: "SENSEX"
+    #   exchange: "BSE"
+    #   instrument_type: "EQ"
+    #   segment: "INDICES"
     
-    - label: "NIFTY MIDCAP 100"
-      tradingsymbol: "NIFTY MIDCAP 100"
-      exchange: "NSE"
-      instrument_type: "EQ"
-      segment: "INDICES"
+    # - label: "NIFTY MIDCAP 100"
+    #   tradingsymbol: "NIFTY MIDCAP 100"
+    #   exchange: "NSE"
+    #   instrument_type: "EQ"
+    #   segment: "INDICES"
     
-    - label: "BANKEX"
-      tradingsymbol: "BANKEX"
-      exchange: "BSE"
-      instrument_type: "EQ"
-      segment: "INDICES"
+    # - label: "BANKEX"
+    #   tradingsymbol: "BANKEX"
+    #   exchange: "BSE"
+    #   instrument_type: "EQ"
+    #   segment: "INDICES"
     
-    - label: "NIFTY BANK"
-      tradingsymbol: "NIFTY BANK"
-      exchange: "NSE"
-      instrument_type: "EQ"
-      segment: "INDICES"
+    # - label: "NIFTY BANK"
+    #   tradingsymbol: "NIFTY BANK"
+    #   exchange: "NSE"
+    #   instrument_type: "EQ"
+    #   segment: "INDICES"
     
-    - label: "NIFTY 100"
-      tradingsymbol: "NIFTY 100"
-      exchange: "NSE"
-      instrument_type: "EQ"
-      segment: "INDICES"
+    # - label: "NIFTY 100"
+    #   tradingsymbol: "NIFTY 100"
+    #   exchange: "NSE"
+    #   instrument_type: "EQ"
+    #   segment: "INDICES"
     
-    - label: "NIFTY IT"
-      tradingsymbol: "NIFTY IT"
-      exchange: "NSE"
-      instrument_type: "EQ"
-      segment: "INDICES"
+    # - label: "NIFTY IT"
+    #   tradingsymbol: "NIFTY IT"
+    #   exchange: "NSE"
+    #   instrument_type: "EQ"
+    #   segment: "INDICES"
     
-    - label: "NIFTY MIDCAP 50"
-      tradingsymbol: "NIFTY MIDCAP 50"
-      exchange: "NSE"
-      instrument_type: "EQ"
-      segment: "INDICES"
+    # - label: "NIFTY MIDCAP 50"
+    #   tradingsymbol: "NIFTY MIDCAP 50"
+    #   exchange: "NSE"
+    #   instrument_type: "EQ"
+    #   segment: "INDICES"
 
 # ============================================================================
 # MACHINE LEARNING & MODEL TRAINING
@@ -302,8 +607,8 @@ trading:
 model_training:
   # Basic Training Configuration
   artifacts_path: "models/artifacts"
-  historical_data_lookback_days: 30
-  min_data_for_training: 5000
+  historical_data_lookback_days: 365
+  min_data_for_training: 200
   confidence_threshold: 0.3
   drift_threshold_z_score: 3.0
   model_staleness_days: 7
@@ -338,16 +643,17 @@ model_training:
     verbose: -1
     seed: 42
     deterministic: true
-    num_leaves: 31
-    learning_rate: 0.05
-    feature_fraction: 0.9
-    bagging_fraction: 0.8
-    bagging_freq: 5
-    min_child_samples: 20
-    lambda_l1: 0.1
-    lambda_l2: 0.1
-    max_depth: -1
-    min_gain_to_split: 0.0
+    # Multi-timeframe optimized parameters (3x more features: ~102 vs ~34)
+    num_leaves: 63                 # Increased from 31 to handle more complex feature interactions
+    learning_rate: 0.03            # Reduced from 0.05 for better generalization with more features
+    feature_fraction: 0.7          # Reduced from 0.9 to prevent overfitting with 102 features
+    bagging_fraction: 0.8          # Kept stable for good variance reduction
+    bagging_freq: 5                # Kept stable
+    min_child_samples: 30          # Increased from 20 for better generalization
+    lambda_l1: 0.2                 # Increased from 0.1 for stronger L1 regularization
+    lambda_l2: 0.2                 # Increased from 0.1 for stronger L2 regularization
+    max_depth: 8                   # Set explicit depth limit (was -1) to prevent overfitting
+    min_gain_to_split: 0.01        # Increased from 0.0 to require meaningful splits
   
   # ──────────────────────────────────────────────────────────────────────────
   # HYPERPARAMETER OPTIMIZATION
@@ -355,18 +661,18 @@ model_training:
   # ──────────────────────────────────────────────────────────────────────────
   optimization:
     enabled: true
-    n_trials: 50
+    n_trials: 75                     # Increased from 50 for better hyperparameter search with more features
     test_size: 2000
     n_estimators_range: [100, 1000]
-    learning_rate_range: [0.001, 0.1]
-    num_leaves_range: [20, 300]
-    max_depth_range: [3, 12]
-    min_child_samples_range: [5, 100]
-    feature_fraction_range: [0.4, 1.0]
-    bagging_fraction_range: [0.4, 1.0]
-    bagging_freq_range: [1, 7]
-    lambda_l1_range: [1.0e-8, 10.0]
-    lambda_l2_range: [1.0e-8, 10.0]
+    learning_rate_range: [0.001, 0.08]  # Reduced upper bound from 0.1 for multi-timeframe stability
+    num_leaves_range: [31, 127]         # Adjusted range: start from 31, max 127 for 102 features
+    max_depth_range: [6, 12]            # Increased lower bound from 3 to handle feature complexity
+    min_child_samples_range: [15, 50]   # Adjusted range for better generalization with more features
+    feature_fraction_range: [0.5, 0.8]  # Reduced range from [0.4, 1.0] - crucial for 102 features
+    bagging_fraction_range: [0.6, 0.9]  # Tightened range from [0.4, 1.0] for stability
+    bagging_freq_range: [3, 7]          # Increased lower bound from 1 for better variance reduction
+    lambda_l1_range: [0.05, 2.0]        # Adjusted from [1e-8, 10.0] - stronger regularization needed
+    lambda_l2_range: [0.05, 2.0]        # Adjusted from [1e-8, 10.0] - stronger regularization needed
     roc_auc_multi_class: "ovr"
     roc_auc_average: "weighted"
     early_stopping_rounds: 50
@@ -386,6 +692,29 @@ model_training:
   retention:
     max_model_versions: 5
   
+  # ──────────────────────────────────────────────────────────────────────────
+  # MODEL REGISTRY CONFIGURATION
+  # Centralized model management system for production-grade model tracking
+  # ──────────────────────────────────────────────────────────────────────────
+  model_registry:
+    enabled: true
+    auto_register: true              # Automatically register models after training
+    auto_activate: false             # Manually control model activation for safety
+    activation_threshold:
+      min_accuracy: 0.45             # Increased from 0.35 - must beat random (33%) significantly
+      min_f1_score: 0.50            # Increased from 0.35 - ensure balanced performance
+      min_sharpe_ratio: 0.8         # Increased from 0.0 - reasonable for intraday trading
+      max_max_drawdown: 0.15        # Decreased from 0.5 - limit downside risk to 15%
+    trading_metrics_calculation:
+      enabled: true                  # Calculate trading-specific metrics
+      risk_free_rate: 0.05          # Annual risk-free rate for Sharpe calculation
+      trading_days_per_year: 252    # Number of trading days per year
+      signal_weight: 1.0            # Weight for signal strength calculation
+      transaction_cost: 0.001       # Transaction cost per trade (0.1%)
+    version_format: "{instrument_id}_{timeframe}_{timestamp}"
+    cleanup_enabled: true           # Enable automatic cleanup of old entries
+    max_registry_entries: 50       # Maximum number of registry entries to keep
+
   # Class Labels for Multi-class Classification
   class_label_mapping:
     -1: "sell"
@@ -396,7 +725,32 @@ model_training:
   feature_ranges:
     rsi_14: [0, 100]
     bb_position: [-3, 3]
-    macd_signal: [-2, 2]
+    macd_macd: [-500, 500]     # Expanded for indices (NIFTY ~20k levels)
+    macd_signal: [-500, 500]   # Expanded for indices 
+    macd_hist: [-300, 300]     # Expanded for indices
+    stoch_k: [0, 100]
+    stoch_d: [0, 100]
+    stoch_momentum_divergence: [-100, 100]
+    stoch_momentum_strength: [0, 1]
+    stoch_position_normalized: [-1, 1]
+    stoch_mean_reversion: [0, 1]
+    stoch_crossover_signal: [-1, 1]
+    # Enhanced indicator ranges
+    momentum_ratio_5d: [-1, 1]
+    momentum_ratio_10d: [-1, 1]
+    momentum_ratio_20d: [-1, 1]
+    momentum_ratio_50d: [-1, 1]
+    rsi_momentum_normalized: [-1, 1]
+    macd_momentum_strength: [0, 5]  # Percentage-based: 0-5% of MACD value (instrument-agnostic)
+    volatility_adjusted_return: [-10, 10]
+    vol_adjusted_bb_position: [-5, 5]
+    trend_strength_normalized: [0, 2]
+    trend_consensus: [-1, 1]
+    rsi_mean_reversion: [0, 1]
+    willr_mean_reversion: [0, 1]
+    composite_mean_reversion: [0, 1]
+    bb_breakout_strength: [0, 1]
+    volume_confirmed_breakout: [0, 2]
   
   # ──────────────────────────────────────────────────────────────────────────
   # FEATURE ENGINEERING PIPELINE
@@ -425,6 +779,7 @@ model_training:
       target_feature_count: 50
       importance_history_length: 10
       correlation_threshold: 0.85
+      correlation_data_lookback_multiplier: 2
       stability_weight: 0.3      # Weight for feature stability over time
       consistency_weight: 0.3    # Weight for feature consistency across models
       importance_weight: 0.4     # Weight for feature importance scores
@@ -528,6 +883,8 @@ data_quality:
   # Outlier Detection
   outlier_detection:
     iqr_multiplier: 1.5
+    handling_strategy: "clip"  # Options: "clip", "remove", "flag"
+    min_iqr_data_points: 4
 
   # Quality Penalties
   penalties:
@@ -541,14 +898,150 @@ data_quality:
     enabled: true
     min_valid_rows: 50
     quality_score_threshold: 80.0
-    required_columns: ["timestamp", "open", "high", "low", "close", "volume"]
+    required_columns: ["ts", "open", "high", "low", "close", "volume", "oi"]
     expected_columns:
       date: "datetime64[ns]"
       open: "float64"
       high: "float64"
       low: "float64"
       close: "float64"
-      volume: "int64"
+      # volume: "int64"
+    
+    # Enhanced indicator validation thresholds
+    indicator_validation:
+      min_data_length: 20
+      stoch_min_data_multiplier: 3  # min_data = (fastk + slowk + slowd) * multiplier
+      rsi_data_buffer: 10           # min_data = timeperiod + buffer
+
+    # Instrument segment definitions for validation logic
+    instrument_segments:
+      index_segments: ["INDICES"]
+      equity_segments: ["EQ"]
+      fno_segments: ["NFO-FUT", "NFO-OPT", "BFO-FUT", "BFO-OPT"]
+
+    # Column definitions for validation
+    column_definitions:
+      timestamp_columns: ["ts", "timestamp", "datetime", "time"]
+      price_columns: ["open", "high", "low", "close"]
+
+  # Feature Validation Configuration
+  feature_validation:
+    enabled: true  # Enable feature validation
+    auto_discovery: true  # Auto-discover validation rules from indicator configurations
+    
+    # Custom validation rules (optional)
+    custom_rules:
+      # Additional range rules not covered by auto-discovery
+      range_rules:
+        - pattern: "^bb_position$"
+          min_value: -3.0
+          max_value: 3.0
+          priority: 9
+          description: "Bollinger Bands position normalization"
+        - pattern: "^.*_normalized$"
+          min_value: -1.0
+          max_value: 1.0
+          priority: 7
+          description: "Normalized features should be in [-1, 1] range"
+        - pattern: "^.*_strength$"
+          min_value: 0.0
+          max_value: 1.0
+          priority: 7
+          description: "Strength indicators should be in [0, 1] range"
+        - pattern: "^.*_ratio.*$"
+          min_value: -5.0
+          max_value: 5.0
+          priority: 5
+          description: "Ratio features reasonable bounds"
+
+    # Price Relative Validation Rules 
+    price_relative_rules:
+        - pattern: "^sar.*$"
+          validator: "price_relative"
+          priority: 10
+          description: "SAR values must be within reasonable price range"
+          params:
+            min_price_multiplier: 0.1   # SAR should not be less than 10% of min price
+            max_price_multiplier: 1.5   # SAR should not exceed 150% of max price
+            lookback_periods: 20        # Look back period for price range
+            violation_threshold_pct: 5.0 # Allow up to 5% violations
+
+    # Cross-feature consistency validation rules
+    consistency_rules:
+      - name: "stochastic_consistency"
+        type: "volatility_comparison"
+        features: ["stoch_k", "stoch_d"]
+        params:
+          ratio_threshold: 1.5
+          window: 10
+      - name: "bollinger_band_ordering"
+        type: "band_ordering"
+        features: ["bb_upper", "bb_middle", "bb_lower"]
+        params:
+          tolerance: 0.001
+      - name: "macd_histogram_check"
+        type: "calculation_check"
+        features: ["macd", "macd_signal", "macd_hist"]
+        params:
+          formula: "macd - macd_signal"
+          target: "macd_hist"
+          tolerance: 0.001
+
+    # Rule parser priorities
+    rule_priorities:
+      model_training_range_parser: 10
+      indicator_config_parser: 8
+      custom_rule_parser: 7
+
+    # New consistency rule default parameters
+    consistency_rule_defaults:
+      volatility_comparison:
+        ratio_threshold: 1.5
+        window: 10
+      band_ordering:
+        tolerance: 0.0
+      calculation_check:
+        tolerance: 0.001
+
+    standard_indicator_ranges:
+      RSI: [0, 100]
+      STOCH: [0, 100]
+      WILLR: [-100, 0]
+      CCI: [-500, 500]               # Increased from [-300, 300] for index volatility
+      CMO: [-100, 100]
+      ULTOSC: [0, 100]
+      ADX: [0, 100]
+      AROON: [0, 100]
+      BOP: [-1, 1]
+      MACD: [-100, 100]             # Increased from [-10, 10] for index data
+      SAR: [0, 100000]
+      HT_TRENDLINE: [0, 100000]
+      OBV: [-inf, inf]
+      ADOSC: [-1000000, 1000000]
+      ATR: [0, 10000]
+      STDDEV: [0, 10000]
+      TRANGE: [0, 10000]
+      HT_DCPERIOD: [0, 100]
+      HT_PHASOR: [-1, 1]
+    
+    # Cross-feature validation settings (deprecated - kept for backward compatibility)
+    cross_validation:
+      enabled: true
+      
+      # Oscillator consistency checks
+      oscillator_consistency:
+        stochastic_volatility_ratio: 2.5  # %D should be smoother than %K (relaxed for volatile markets)
+        rsi_correlation_threshold: 0.8     # Different RSI periods should be correlated
+      
+      # Bollinger Bands ordering validation
+      bollinger_validation:
+        enabled: true
+        tolerance: 0.001  # Small tolerance for numerical precision
+      
+      # MACD consistency validation
+      macd_validation:
+        enabled: true
+        histogram_tolerance: 0.001  # MACD hist = MACD line - signal line
 
   # Live Data Thresholds
   live_data_lpt_threshold: 1000000
@@ -604,26 +1097,11 @@ data_pipeline:
 
 # ============================================================================
 # MARKET CALENDAR & TRADING HOURS
-# Market timing, holidays, and special trading sessions
+# MARKET CALENDAR CONFIGURATION REMOVED
 # ============================================================================
-market_calendar:
-  holidays_cache_path: "cache/holidays.json"
-  holidays: []
-  
-  # Regular Trading Hours
-  market_open_time: "09:15"
-  market_close_time: "15:30"
-  
-  # Special Trading Sessions
-  muhurat_trading_sessions:
-    - date: "2025-10-21"  # Diwali Laxmi Pujan
-      open: "18:00"       # Placeholder, timings to be notified
-      close: "19:15"      # Placeholder, timings to be notified
-  
-  half_day_sessions:
-    - date: "2025-02-01"  # Budget Day
-      open: "09:15"
-      close: "12:30"
+# Market holidays and trading hours are now stored in the database
+# Use upstox_orchestrator.py option 4 to fetch and populate holiday data
+# ============================================================================
 
 # ============================================================================
 # AUTHENTICATION & SECURITY
@@ -632,9 +1110,16 @@ market_calendar:
 auth_server:
   max_retries: 5
   server_host: "0.0.0.0"
-  timeout_seconds: 300
+  timeout_seconds: 120  # Reduced from 300 to 120 seconds (2 minutes)
   open_browser: true
   auto_close_seconds: 10
+
+# ============================================================================
+# API CONFIGURATION
+# ============================================================================
+api:
+  admin_token: "secure-admin-token"
+  host: "127.0.0.1"
 
 # ============================================================================
 # STATISTICS & ANALYTICS

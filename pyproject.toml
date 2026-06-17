@@ -34,7 +34,7 @@ dependencies = [
     "prometheus-client>=0.19.0", # Added for metrics
     
     # Technical Analysis
-    # "ta-lib", # Commented out - using pandas fallback implementation
+    "TA-Lib>=0.4.28",
     "numba>=0.61.2", # Updated from 0.58.0 to 0.61.2
     # Performance & Memory
     "psutil>=5.9.0", # No newer version found
@@ -45,6 +45,11 @@ dependencies = [
     "websockets>=11.0.0", # No newer version found
     "aiofiles>=24.1.0", # Updated from 23.2.0 to 24.1.0
     "Flask>=2.0.0", # Added for local auth server
+    
+    # FastAPI and API dependencies
+    "fastapi>=0.104.0", # For REST API endpoints
+    "uvicorn[standard]>=0.24.0", # ASGI server for FastAPI
+    "python-multipart>=0.0.6", # For form data handling
     
     # Time handling
     "pytz>=2023.3", # No newer version found

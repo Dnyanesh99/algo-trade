@@ -68,7 +68,7 @@ class MetricsRegistry:
                     )
 
                 self._metrics[metric_def.name] = metric
-                logger.debug(f"Created {metric_def.type} metric: {metric_name}")
+                logger.info(f"Registered metric: {metric_name} of type {metric_def.type}")
 
     def start_metrics_server(self, port: Optional[int] = None) -> None:
         """Start the Prometheus metrics HTTP server"""
@@ -152,10 +152,15 @@ class MetricsRegistry:
         if not self.is_enabled():
             return
 
-        labels = {"operation": operation, "table": table, "success": str(success)}
-        self.increment_counter("db_queries_total", labels)
-        self.observe_histogram("db_query_duration_seconds", duration, labels)
-        self.increment_counter("db_query_rows_affected_total", labels, value=float(rows))
+        query_total_labels = {"operation": operation, "table": table, "status": str(success)}
+        logger.debug(f"Recording db_queries_total with labels: {query_total_labels}")
+        self.increment_counter("db_queries_total", query_total_labels)
+
+        duration_rows_labels = {"operation": operation, "table": table}
+        logger.debug(f"Recording db_query_duration_seconds with labels: {duration_rows_labels}")
+        self.observe_histogram("db_query_duration_seconds", duration, duration_rows_labels)
+        logger.debug(f"Recording db_rows_processed_total with labels: {duration_rows_labels}")
+        self.increment_counter("db_rows_processed_total", duration_rows_labels, value=float(rows))
 
     def record_broker_api_request(self, api_name: str, success: bool, duration: float) -> None:
         """Record broker API request metrics."""

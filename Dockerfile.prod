@@ -12,6 +12,10 @@ COPY main.py pyproject.toml ./
 # Install the package in editable mode (dependencies already installed in base image)
 RUN pip install -e .
 
+# Create logs directory and set permissions
+RUN mkdir -p /app/logs
+RUN chown -R appuser:appuser /app/logs
+
 # Fix ownership for any new files
 RUN chown -R appuser:appuser /app
 
