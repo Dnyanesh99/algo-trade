@@ -3,7 +3,7 @@ name = "algo-trade"
 version = "2.0.0"
 description = "Production-grade Automated Intraday Trading Signal Generation System"
 authors = [
-    { name = "Senior Quantitative Developer", email = "trader@example.com" }
+    { name = "Algo Trade Developer", email = "developer@example.com" }
 ]
 dependencies = [
     # Core data processing
