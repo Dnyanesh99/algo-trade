@@ -1,0 +1,17 @@
+{
+    "name": "Debug & Root Cause Analysis Agent",
+    "purpose": "Specialized failure investigator.",
+    "responsibilities": [
+        "Analyze defects",
+        "Reproduce issues",
+        "Identify root causes",
+        "Recommend fixes"
+    ],
+    "inputs": [
+        "logs/findings/*",
+        "tests/reports/*"
+    ],
+    "outputs": [
+        "docs/reports/debug-analysis.md"
+    ]
+}

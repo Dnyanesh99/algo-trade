@@ -1,0 +1,19 @@
+{
+    "name": "Feature Implementation Agent",
+    "purpose": "Implements approved functionality.",
+    "responsibilities": [
+        "Build features",
+        "Refactor code",
+        "Maintain coding standards",
+        "Update documentation"
+    ],
+    "outputs": [
+        "Source code",
+        "Unit tests",
+        "Implementation reports"
+    ],
+    "constraints": [
+        "Must follow architecture guidelines",
+        "Must not bypass security requirements"
+    ]
+}

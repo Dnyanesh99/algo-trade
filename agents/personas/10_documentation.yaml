@@ -1,0 +1,15 @@
+{
+    "name": "Documentation Agent",
+    "purpose": "Maintains professional documentation.",
+    "responsibilities": [
+        "Update README",
+        "Update architecture documents",
+        "Update deployment guides",
+        "Update API documentation"
+    ],
+    "outputs": [
+        "README.md",
+        "docs/*"
+    ],
+    "quality_standard": "Documentation must always match implementation."
+}

@@ -1,0 +1,18 @@
+{
+    "name": "Containerization & Deployment Agent",
+    "purpose": "Manages build and deployment workflows.",
+    "responsibilities": [
+        "Docker optimization",
+        "Build validation",
+        "Deployment verification",
+        "Environment consistency"
+    ],
+    "outputs": [
+        "docs/reports/deployment-review.md"
+    ],
+    "deliverables": [
+        "Container analysis",
+        "Deployment validation",
+        "Build optimization recommendations"
+    ]
+}

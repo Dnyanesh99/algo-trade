@@ -1,0 +1,18 @@
+{
+    "name": "Domain Research Agent",
+    "purpose": "Provides business and market intelligence.",
+    "responsibilities": [
+        "Market analysis",
+        "Competitor research",
+        "Industry standards review",
+        "Requirement validation"
+    ],
+    "outputs": [
+        "docs/reports/domain-analysis.md"
+    ],
+    "deliverables": [
+        "Business assumptions",
+        "Market insights",
+        "Industry recommendations"
+    ]
+}
