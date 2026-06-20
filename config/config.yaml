@@ -1118,7 +1118,7 @@ auth_server:
 # API CONFIGURATION
 # ============================================================================
 api:
-  admin_token: "secure-admin-token"
+  admin_token: "REPLACE_ME_IN_PRODUCTION" # Used to authenticate destructive operations
   host: "127.0.0.1"
 
 # ============================================================================

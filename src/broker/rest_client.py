@@ -64,10 +64,10 @@ class KiteRESTClient:
             logger.warning("Access token is not yet available. Initializing KiteConnect client without it.")
             logger.warning("Any API calls requiring authentication will fail until the token is set and updated.")
             # Allow initialization without a token, but it will be unusable for most APIs.
-            return KiteConnect(api_key=self.api_key, disable_ssl=True)
+            return KiteConnect(api_key=self.api_key)
 
         logger.info("KiteConnect client initialized with a valid access token.")
-        return KiteConnect(api_key=self.api_key, access_token=access_token, disable_ssl=True)
+        return KiteConnect(api_key=self.api_key, access_token=access_token)
 
     def _update_access_token(self) -> None:
         """

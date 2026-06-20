@@ -143,170 +143,6 @@ async def handle_auth_failure(token_manager: TokenManager, config: Any, error_co
     return False
 
 
-# async def process_historical_instrument(
-#     configured_inst: Any,
-#     instrument_repo: InstrumentRepository,
-#     historical_fetcher: HistoricalFetcher,
-#     historical_processor: HistoricalProcessor,
-#     ohlcv_repo: OHLCVRepository,
-#     historical_aggregator: HistoricalAggregator,
-#     feature_calculator: FeatureCalculator,
-#     labeler: OptimizedTripleBarrierLabeler,
-#     lgbm_trainer: LGBMTrainer,
-#     config: Any,
-# ) -> None:
-#     """Process historical data for a single instrument."""
-#     try:
-#         # Get instrument details from database
-#         instrument = await instrument_repo.get_instrument_by_tradingsymbol(
-#             configured_inst.tradingsymbol, configured_inst.exchange
-#         )
-#         if not instrument:
-#             logger.warning(f"Instrument {configured_inst.tradingsymbol} not found in database. Skipping.")
-#             return
-
-#         instrument_id = instrument.instrument_id
-#         instrument_token = instrument.instrument_token
-#         symbol = instrument.tradingsymbol
-
-#         logger.info(f"Processing instrument: {symbol} (ID: {instrument_id}, Token: {instrument_token})")
-
-#         # 1. Fetch historical data (configured period of 1-minute data)
-#         try:
-#             model_training_config = config.model_training
-#             lookback_days = model_training_config.historical_data_lookback_days
-
-#             end_date = datetime.now()
-#             start_date = end_date - timedelta(days=lookback_days)
-
-#             historical_data = await historical_fetcher.fetch_historical_data(instrument_token, start_date, end_date)
-
-#             if not historical_data:
-#                 logger.warning(f"No historical data fetched for {symbol}. Skipping.")
-#                 return
-
-#             logger.info(f"Fetched {len(historical_data)} 1-minute candles for {symbol}")
-#         except Exception as e:
-#             logger.error(f"Error fetching historical data for {symbol}: {e}", exc_info=True)
-#             return
-
-#         # 2. Process and validate historical data
-#         try:
-#             instrument_segment = configured_inst.segment
-#             logger.info(f"Processing {symbol} with segment: {instrument_segment}")
-#             df_processed, quality_report = historical_processor.process(historical_data, symbol, instrument_segment)
-
-#             if df_processed.empty:
-#                 logger.warning(f"No valid data after processing for {symbol}. Skipping.")
-#                 return
-
-#             logger.info(f"Processed {len(df_processed)} valid 1-minute candles for {symbol}")
-#         except Exception as e:
-#             logger.error(f"Error processing historical data for {symbol}: {e}", exc_info=True)
-#             return
-
-#         # Store 1-minute data first
-#         try:
-#             ohlcv_records = []
-#             for _, row in df_processed.iterrows():
-#                 candle_data = {
-#                     "ts": row["ts"],
-#                     "open": row["open"],
-#                     "high": row["high"],
-#                     "low": row["low"],
-#                     "close": row["close"],
-#                     "volume": row["volume"],
-#                     "oi": row.get("oi", None),
-#                 }
-#                 ohlcv_records.append(OHLCVData(**candle_data))
-
-#             await ohlcv_repo.insert_ohlcv_data(instrument_id, "1min", ohlcv_records)
-#         except Exception as e:
-#             logger.error(f"Error storing 1-minute OHLCV data for {symbol}: {e}", exc_info=True)
-#             return
-
-#         # 3. Prepare DataFrame for aggregation (already has ts column from processor)
-#         df_for_aggregation = df_processed
-
-#         # Aggregate to higher timeframes
-#         try:
-#             aggregation_results = await historical_aggregator.aggregate_and_store(instrument_id, df_for_aggregation)
-#             successful_aggregations = [r for r in aggregation_results if r.success]
-
-#             logger.info(
-#                 f"Successfully aggregated {len(successful_aggregations)}/{len(aggregation_results)} timeframes for {symbol}"
-#             )
-#         except Exception as e:
-#             logger.error(f"Error aggregating historical data for {symbol}: {e}", exc_info=True)
-#             return
-
-#         # 4. Calculate features for each timeframe
-#         for timeframe in config.trading.feature_timeframes:
-#             timeframe_str = f"{timeframe}min"
-#             try:
-#                 latest_candle = await ohlcv_repo.get_latest_candle(instrument_id, timeframe_str)
-#                 if not latest_candle:
-#                     logger.warning(f"No {timeframe_str} data found for {symbol}. Skipping feature calculation.")
-#                     continue
-
-#                 latest_timestamp = latest_candle.ts
-
-#                 feature_results = await feature_calculator.calculate_and_store_features(instrument_id, latest_timestamp)
-
-#                 successful_features = [r for r in feature_results if r.success]
-#                 logger.info(f"Successfully calculated features for {len(successful_features)} timeframes for {symbol}")
-#             except Exception as e:
-#                 logger.error(f"Error calculating features for {symbol} ({timeframe_str}): {e}", exc_info=True)
-#                 continue
-
-#         # 5. Label data using triple barrier method (only for target signal timeframes)
-#         for timeframe in config.trading.labeling_timeframes:
-#             timeframe_str = f"{timeframe}min"
-#             try:
-#                 ohlcv_data = await ohlcv_repo.get_ohlcv_data_for_features(
-#                     instrument_id, timeframe, config.trading.labeling.ohlcv_data_limit_for_labeling
-#                 )
-#                 if len(ohlcv_data) < config.trading.labeling.minimum_ohlcv_data_for_labeling:
-#                     logger.warning(f"Insufficient {timeframe_str} data for labeling {symbol}. Skipping.")
-#                     continue
-
-#                 labeling_df = pd.DataFrame([o.model_dump() for o in ohlcv_data])
-#                 labeling_df["timestamp"] = labeling_df["ts"]
-
-#                 labeling_stats = await labeler.process_symbol(instrument_id, symbol, labeling_df, timeframe_str)
-
-#                 if labeling_stats:
-#                     logger.info(
-#                         f"Successfully labeled {labeling_stats.labeled_bars} bars for {symbol} ({timeframe_str})"
-#                     )
-#                 else:
-#                     logger.warning(f"Failed to label data for {symbol} ({timeframe_str})")
-#             except Exception as e:
-#                 logger.error(f"Error labeling data for {symbol} ({timeframe_str}): {e}", exc_info=True)
-#                 continue
-
-#         # 6. Train model for each labeling timeframe (need both features and labels)
-#         for timeframe in config.trading.labeling_timeframes:
-#             timeframe_str = f"{timeframe}min"
-#             try:
-#                 model_path = await lgbm_trainer.train_model(
-#                     instrument_id, timeframe_str, optimize_hyperparams=config.model_training.optimize_hyperparams
-#                 )
-
-#                 if model_path:
-#                     logger.info(f"Successfully trained model for {symbol} ({timeframe_str}): {model_path}")
-#                 else:
-#                     logger.warning(f"Failed to train model for {symbol} ({timeframe_str})")
-#             except Exception as e:
-#                 logger.error(f"Error training model for {symbol} ({timeframe_str}): {e}", exc_info=True)
-#                 continue
-
-#         logger.info(f"Completed historical processing for {symbol}")
-
-#     except Exception as e:
-#         symbol = getattr(configured_inst, "tradingsymbol", "Unknown")
-#         logger.error(f"Error processing instrument {symbol}: {e}", exc_info=True)
-#         logger.info("Continuing with next instrument...")
 
 
 async def initialize_historical_mode_enhanced(
@@ -412,72 +248,6 @@ async def initialize_historical_mode_enhanced(
         await labeler.shutdown()
 
 
-# async def initialize_historical_mode(
-#     config: Any,
-#     system_state: SystemState,
-#     alert_system: AlertSystem,
-#     error_handler: ErrorHandler,
-#     instrument_repo: InstrumentRepository,
-# ) -> None:
-#     """Initialize and run historical mode processing (Original - Fully Functional)."""
-#     logger.info("Running in HISTORICAL_MODE. Orchestrating historical data processing and training.")
-
-#     # Initialize components
-#     health_monitor = HealthMonitor(system_state, None, db_manager, config.health_monitor, config.system)
-#     metrics_registry.start_metrics_server()
-
-#     # Initialize repositories
-#     ohlcv_repo = OHLCVRepository()
-#     feature_repo = FeatureRepository()
-#     label_repo = LabelRepository()
-#     stats_repo = LabelingStatsRepository()
-
-#     # Initialize pipeline components
-#     token_manager = TokenManager()
-#     rest_client = KiteRESTClient(token_manager, config.broker.api_key)
-#     await rest_client.initialize(config)
-
-#     historical_fetcher = HistoricalFetcher(rest_client)
-#     historical_processor = HistoricalProcessor()
-#     historical_aggregator = HistoricalAggregator(ohlcv_repo, error_handler, health_monitor)
-#     feature_calculator = FeatureCalculator(ohlcv_repo, feature_repo, instrument_repo, error_handler, health_monitor)
-
-#     labeler = OptimizedTripleBarrierLabeler(
-#         config.trading.labeling, label_repo, instrument_repo, stats_repo, config.trading.labeling_timeframes
-#     )
-#     lgbm_trainer = LGBMTrainer(feature_repo, label_repo, error_handler, health_monitor, feature_calculator)
-
-#     try:
-#         # Get configured instruments from config
-#         if not config.trading.instruments:
-#             logger.error("No instruments configured for historical processing.")
-#             return
-
-#         logger.info(f"Processing {len(config.trading.instruments)} instruments for historical data pipeline.")
-
-#         # Process each instrument
-#         for configured_inst in config.trading.instruments:
-#             await process_historical_instrument(
-#                 configured_inst,
-#                 instrument_repo,
-#                 historical_fetcher,
-#                 historical_processor,
-#                 ohlcv_repo,
-#                 historical_aggregator,
-#                 feature_calculator,
-#                 labeler,
-#                 lgbm_trainer,
-#                 config,
-#             )
-
-#         logger.info("Historical data processing and training complete.")
-
-#     except Exception as e:
-#         logger.critical(f"Error in historical mode orchestration: {e}", exc_info=True)
-#         await error_handler.handle_error("historical_pipeline", f"Historical processing failed: {e}", {"error": str(e)})
-
-#     finally:
-#         await labeler.shutdown()
 
 
 async def initialize_live_mode(
@@ -556,11 +326,15 @@ async def initialize_live_mode(
     feature_calculator = FeatureCalculator(ohlcv_repo, feature_repo, instrument_repo, error_handler, health_monitor)
     model_predictor = ModelPredictor(error_handler, health_monitor)
     signal_repo = SignalRepository()
+
+    async def log_signal(signal_data: dict[str, Any]) -> None:
+        logger.info(f"Signal generated: {signal_data}")
+
     signal_generator = SignalGenerator(
         signal_repo,
         error_handler,
         health_monitor,
-        on_signal_generated=lambda signal_data: logger.info(f"Signal generated: {signal_data}"),
+        on_signal_generated=log_signal,
     )
 
     async def candle_complete_callback(candle: dict[str, Any]) -> None:
@@ -586,7 +360,7 @@ async def initialize_live_mode(
     await rest_client_local.initialize(config)
 
     # Instantiate and connect the resilience components
-    backfill_manager = BackfillManager(rest_client_local)
+    backfill_manager = BackfillManager(rest_client_local, ohlcv_repo=ohlcv_repo)
 
     async def on_data_gap_detected() -> None:
         logger.warning("Data gap detected due to reconnection. Initiating backfill.")
@@ -603,8 +377,11 @@ async def initialize_live_mode(
                 try:
                     missing_data = await backfill_manager.fetch_missing_data(token, last_known_timestamp)
                     if missing_data:
-                        # This would feed into the StreamConsumer or a dedicated backfill processor
-                        logger.info(f"Would merge {len(missing_data)} backfilled candles for {token}")
+                        instrument = await instrument_repo.get_instrument_by_token(token)
+                        if instrument:
+                            await backfill_manager.merge_with_live_stream(instrument.instrument_id, missing_data)
+                        else:
+                            logger.error(f"Could not resolve instrument_id for token {token} during backfill.")
                 except Exception as e:
                     logger.error(f"Error fetching missing data for token {token}: {e}", exc_info=True)
                     continue
@@ -635,6 +412,7 @@ async def initialize_live_mode(
             signal_generator=signal_generator,
             feature_repo=feature_repo,
             error_handler=error_handler,
+            instrument_repo=instrument_repo,
             config=config,
         ),
         scheduler_config=config.scheduler,
@@ -666,6 +444,7 @@ async def prediction_pipeline_callback(
     signal_generator: SignalGenerator,
     feature_repo: FeatureRepository,
     error_handler: ErrorHandler,
+    instrument_repo: InstrumentRepository,
     config: Any,
 ) -> None:
     """
@@ -687,35 +466,42 @@ async def prediction_pipeline_callback(
 
         for instrument_token in active_instruments:
             try:
+                instrument = await instrument_repo.get_instrument_by_token(instrument_token)
+                if not instrument:
+                    logger.error(f"Could not resolve instrument_id for token {instrument_token}")
+                    continue
+                
+                instrument_id = instrument.instrument_id
                 prediction_timeframe = config.scheduler.prediction_timeframe
+                
                 latest_candle = await feature_calculator.ohlcv_repo.get_latest_candle(
-                    instrument_token, prediction_timeframe
+                    instrument_id, prediction_timeframe
                 )
                 if not latest_candle:
-                    logger.warning(f"No latest candle found for instrument {instrument_token}")
+                    logger.warning(f"No latest candle found for instrument_id {instrument_id}")
                     continue
 
                 feature_results = await feature_calculator.calculate_and_store_features(
-                    instrument_token, latest_candle.ts
+                    instrument_id, latest_candle.ts
                 )
 
                 if not any(fr.success for fr in feature_results):
-                    logger.warning(f"Feature calculation failed for instrument {instrument_token}")
+                    logger.warning(f"Feature calculation failed for instrument_id {instrument_id}")
                     continue
 
-                latest_features = await feature_repo.get_latest_features(instrument_token, prediction_timeframe)
+                latest_features = await feature_repo.get_latest_features(instrument_id, prediction_timeframe)
                 if not latest_features:
-                    logger.warning(f"No latest features found for instrument {instrument_token}")
+                    logger.warning(f"No latest features found for instrument_id {instrument_id}")
                     continue
 
                 feature_vector = {f.feature_name: f.feature_value for f in latest_features}
 
                 prediction_result = await model_predictor.predict(
-                    instrument_token, prediction_timeframe, feature_vector
+                    instrument_id, prediction_timeframe, feature_vector
                 )
 
                 if not prediction_result:
-                    logger.warning(f"Prediction failed for instrument {instrument_token}")
+                    logger.warning(f"Prediction failed for instrument_id {instrument_id}")
                     continue
 
                 signal_result = await signal_generator.generate_signal(
