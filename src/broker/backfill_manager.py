@@ -13,9 +13,10 @@ class BackfillManager:
     reconnection or detected data gaps. Fetches missing 1-minute candles using the REST client.
     """
 
-    def __init__(self, rest_client: KiteRESTClient):
+    def __init__(self, rest_client: KiteRESTClient, ohlcv_repo: Any = None):
         # Type hints ensure rest_client is a KiteRESTClient instance
         self.rest_client = rest_client
+        self.ohlcv_repo = ohlcv_repo
         logger.info("BackfillManager initialized successfully.")
 
     async def fetch_missing_data(
@@ -89,24 +90,52 @@ class BackfillManager:
             # Unexpected errors are often more serious, but we still return empty for now.
             return []
 
-    async def merge_with_live_stream(self, missing_data: list[dict[str, Any]]) -> None:
+    async def merge_with_live_stream(self, instrument_id: int, missing_data: list[dict[str, Any]]) -> None:
         """
-        Placeholder for merging fetched missing data with the live data stream.
-        In a real implementation, this would involve inserting data into a buffer or database
-        and ensuring data integrity (no duplicates, correct order).
+        Merges fetched missing data by inserting it into the database.
 
         Args:
+            instrument_id: The database ID of the instrument.
             missing_data: The list of missing candles to merge.
         """
         if not missing_data:
             logger.info("No missing data to merge.")
             return
 
-        logger.info(f"[PLACEHOLDER] Merging {len(missing_data)} missing data points with live stream.")
-        logger.warning("This is a placeholder implementation. In a production system, this method must:")
-        logger.warning("1. Connect to the appropriate data buffer or database repository.")
-        logger.warning("2. Insert the historical candles, handling potential duplicates and ordering.")
-        logger.warning("3. Trigger downstream processes to re-calculate features if necessary.")
-        # Example of what real logic might look like:
-        # await self.data_repository.insert_candles(missing_data)
-        # await self.feature_calculator.recompute_for_instrument(instrument_token)
+        if not self.ohlcv_repo:
+            logger.error("OHLCVRepository not provided to BackfillManager. Cannot merge data.")
+            return
+
+        from src.database.models import OHLCVData
+
+        logger.info(f"Merging {len(missing_data)} missing data points for instrument_id {instrument_id}.")
+        
+        # 1. Parse and insert historical 1-minute candles
+        try:
+            ohlcv_records = []
+            for row in missing_data:
+                # The Kite API returns timestamp under 'date'
+                ts = row.get("date")
+                if not ts:
+                    continue
+                    
+                ohlcv_records.append(
+                    OHLCVData(
+                        ts=ts,
+                        open=row["open"],
+                        high=row["high"],
+                        low=row["low"],
+                        close=row["close"],
+                        volume=row["volume"],
+                        oi=row.get("oi", None)
+                    )
+                )
+                
+            if ohlcv_records:
+                await self.ohlcv_repo.insert_ohlcv_data(instrument_id, "1min", ohlcv_records)
+                logger.info(f"Successfully backfilled {len(ohlcv_records)} 1-minute candles.")
+            else:
+                logger.warning("No valid records to backfill after parsing.")
+                
+        except Exception as e:
+            logger.error(f"Error merging backfill data for instrument {instrument_id}: {e}", exc_info=True)
