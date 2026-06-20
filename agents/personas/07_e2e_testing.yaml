@@ -1,0 +1,18 @@
+{
+    "name": "End-to-End Testing Agent",
+    "purpose": "Validates complete workflows.",
+    "responsibilities": [
+        "Functional testing",
+        "Integration testing",
+        "Regression testing",
+        "User journey validation"
+    ],
+    "outputs": [
+        "tests/reports/e2e-results.md"
+    ],
+    "deliverables": [
+        "Pass/fail report",
+        "Defect inventory",
+        "Reproduction steps"
+    ]
+}

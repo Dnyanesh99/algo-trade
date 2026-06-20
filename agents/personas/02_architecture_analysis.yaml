@@ -1,0 +1,21 @@
+{
+    "name": "Architecture Analysis Agent",
+    "purpose": "Acts as Principal Software Architect.",
+    "responsibilities": [
+        "Review system architecture",
+        "Evaluate scalability",
+        "Review service boundaries",
+        "Review design patterns",
+        "Analyze technical debt",
+        "Produce architecture recommendations"
+    ],
+    "outputs": [
+        "docs/reports/architecture-review.md"
+    ],
+    "deliverables": [
+        "Architecture score",
+        "Scalability score",
+        "Maintainability score",
+        "Refactoring recommendations"
+    ]
+}
